@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Callable
 
 
 class NationReader:
-    def __init__(self, port: str, baudrate: int = 115200):
+    def __init__(self, port: str, baudrate: int = 9600):
         self.port = port
         self.baudrate = baudrate
         self.ser: serial.Serial | None = None
@@ -76,6 +76,10 @@ class NationReader:
             self.ser.close()
             print("🔌 Connection closed.")
 
+
+    def is_alive(self) -> bool:
+        resp = self._send_command(0x00, desc="Ping Reader", expected_mid=0x00)
+        return bool(resp)
 
     def _send_command(self, mid: int, payload: bytes = b'', desc: str = "", expected_mid: int = None) -> bytes:
         frame = self.build_frame(self.addr, mid, payload)
@@ -290,6 +294,7 @@ class NationReader:
                 tag_list = self.parse_inventory_data(list(payload))
                 for tag in tag_list:
                     callback(tag)
+    
     def set_rf_band(self, band_code: int, persistent: bool = True):
         """
         Cấu hình dải tần làm việc: FCC, ETSI, JP, ...
@@ -329,3 +334,20 @@ class NationReader:
                 print(f"⚠️ Parse error: {e}")
                 break
         return tags
+
+    def set_upload_filter(self, rssi_threshold: int = 0, repeat_time_ms: int = 0):
+        if not (0 <= rssi_threshold <= 255):
+            raise ValueError("RSSI must be 0–255")
+        if not (0 <= repeat_time_ms <= 655350):
+            raise ValueError("repeat_time_ms quá lớn")
+
+        repeat_units = repeat_time_ms // 10
+        repeat_bytes = repeat_units.to_bytes(2, 'big')
+        payload = bytearray()
+        payload.extend([0x01])            # PID: repeat time
+        payload.extend(repeat_bytes)     # repeat time in 10ms units
+        payload.extend([0x02, rssi_threshold])  # PID: RSSI
+
+        resp = self._send_command(0x09, payload, desc="Set Upload Filter", expected_mid=0x09)
+        if resp:
+            print("✅ Upload filter set.")
