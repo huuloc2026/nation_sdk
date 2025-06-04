@@ -67,9 +67,18 @@ class NationReader:
         return b'\x5A' + frame_content + crc_bytes
 
     def connect(self):
+        if self.port is None:
+            ports = get_available_ports()
+            if len(ports) == 0:
+                raise RuntimeError("❌ Không tìm thấy cổng serial nào.")
+            elif len(ports) == 1:
+                self.port = ports[0]
+                print(f"✅ Tự động chọn cổng: {self.port}")
+            else:
+                raise RuntimeError(f"❌ Nhiều cổng serial phát hiện: {ports}. Hãy chọn cụ thể.")
+        
         self.ser = serial.Serial(self.port, self.baudrate, timeout=0.3)
         print(f"📡 Connected to {self.port} @ {self.baudrate}bps")
-
 
     def close(self):
         if self.ser and self.ser.is_open:
@@ -257,12 +266,75 @@ class NationReader:
             print("❌ Failed to read RFID ability.")
             return None
 
+    # def start_inventory(self):
+    #     response = self._send_command(
+    #         mid=0x10,
+    #         payload=b'',
+    #         desc="Start Inventory",
+    #         expected_mid=0x10
+    #     )
+
+    #     if not response:
+    #         print("❌ No response from reader when starting inventory.")
+    #         return False
+
+    #     resp_mid = response[6]
+    #     if resp_mid == 0x06:
+    #         status_code = response[-3]
+    #         if status_code == 0x00:
+    #             print("✅ Inventory started (status OK).")
+    #             return True
+    #         else:
+    #             print(f"❌ Failed to start inventory, status code = 0x{status_code:02X}")
+    #             return False
+    #     elif resp_mid == 0x10:
+    #         print("✅ Inventory started (MID=0x10 acknowledged).")
+    #         return True
+    #     else:
+    #         print(f"ℹ️ Inventory response MID = 0x{resp_mid:02X} (not standard 0x10) → continue anyway.")
+    #         return True
+
+    def get_available_ports() -> List[str]:
+        """
+        Trả về danh sách các cổng serial hiện có (USB, ACM, COM).
+        Dùng cho việc gợi ý chọn cổng thiết bị đọc RFID.
+        """
+        ports = serial.tools.list_ports.comports()
+        return [port.device for port in ports]
+
+    def detect_nation_reader(baudrate: int = 9600, timeout: float = 0.3) -> str | None:
+        """
+        Tìm và trả về cổng serial của thiết bị Nation RFID (nếu tìm được).
+        Kiểm tra bằng phản hồi hợp lệ từ query_info().
+        """
+        ports = get_available_ports()
+        print(f"🔍 Đang kiểm tra {len(ports)} cổng serial...")
+
+        for port in ports:
+            try:
+                ser = serial.Serial(port, baudrate=baudrate, timeout=timeout)
+                frame = NationReader.build_frame(0x00, 0x00, b'')  # MID=0x00 → Query Info
+                ser.write(frame)
+                time.sleep(0.2)
+                resp = ser.read(128)
+                ser.close()
+
+                if resp and len(resp) > 12 and resp[6] == 0x00:
+                    print(f"✅ Phát hiện thiết bị Nation tại {port}")
+                    return port
+            except Exception as e:
+                print(f"⚠️ Lỗi khi kiểm tra {port}: {e}")
+
+        print("❌ Không phát hiện được thiết bị Nation.")
+        return None
+
+
     def start_inventory(self):
         response = self._send_command(
             mid=0x10,
             payload=b'',
             desc="Start Inventory",
-            expected_mid=0x10
+            expected_mid=None  # Chấp nhận MID=0x06 hoặc MID=0x10 hoặc không có phản hồi
         )
 
         if not response:
@@ -273,7 +345,7 @@ class NationReader:
         if resp_mid == 0x06:
             status_code = response[-3]
             if status_code == 0x00:
-                print("✅ Inventory started (status OK).")
+                print("✅ Inventory started (MID=0x06 OK).")
                 return True
             else:
                 print(f"❌ Failed to start inventory, status code = 0x{status_code:02X}")
@@ -282,8 +354,23 @@ class NationReader:
             print("✅ Inventory started (MID=0x10 acknowledged).")
             return True
         else:
-            print(f"ℹ️ Inventory response MID = 0x{resp_mid:02X} (not standard 0x10) → continue anyway.")
+            print(f"ℹ️ Inventory response MID = 0x{resp_mid:02X} (not standard) → continue anyway.")
             return True
+
+    def read_tags_loop(self):
+        print("📡 Listening for tag data (MID=0x10)... Press Ctrl+C to stop.")
+        while True:
+            response = self.ser.read(128)
+            if not response:
+                continue
+
+            print(f"[RECV] {response.hex()}")
+
+            if len(response) >= 8 and response[6] == 0x10:
+                payload = response[7:-2]
+                tag_list = self.parse_inventory_data(list(payload))
+                for tag in tag_list:
+                    print(f"📦 Tag: EPC={tag['epc']}, RSSI={tag['rssi']}")
 
     def callback_on_new_tag(self, callback: Callable[[Dict[str, Any]], None]):
         self.start_inventory()

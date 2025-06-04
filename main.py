@@ -2,7 +2,8 @@ from nation_sdk import NationReader
 
 def main():
     port = "/dev/ttyUSB0"
-    reader = NationReader(port)
+    baudrate = 9600
+    reader = NationReader(port,baudrate=baudrate)
     
     try:
         reader.connect()
@@ -34,7 +35,6 @@ def main():
         if reader.start_inventory():
             print("🛰️ Inventory running... Đang chờ thẻ RFID")
 
-            # 8️⃣ Đọc phản hồi tag liên tục
             while True:
                 response = reader.ser.read(128)
                 if not response or len(response) < 8:
@@ -46,6 +46,7 @@ def main():
                     tag_list = reader.parse_inventory_data(list(payload))
                     for tag in tag_list:
                         print(f"🎯 EPC: {tag['epc']}  RSSI: {tag['rssi']} dBm")
+                        
     except KeyboardInterrupt:
         print("⏹️ Inventory stopped by user.")
     except Exception as e:
