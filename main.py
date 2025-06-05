@@ -6,42 +6,52 @@ def main():
     baudrate = 115200
     reader = NationReader(port, baudrate=baudrate)
 
-    continue_inventory = True  # Boolean flag to control the inventory process
-
     try:
         # 1️⃣ Connect to the reader
-        reader.connect()
+        # reader.connect()
+
+        # Send the "Read EPC Tag" command
+        antenna_ports = 0x01  # Use antenna 1
+        read_mode = 0  # Single read mode
+        reader.send_read_epc_tag_command(antenna_ports, read_mode)
+
+        # Receive the notification and parse the EPC data
+        # Assume `data` is the byte data received from the reader
+        data = reader.receive_data()  # This function needs to be defined to receive the data
+        parsed_data = reader.parse_inventory_dataV2(data)
+        print(f"Parsed EPC Data: {parsed_data}")
 
         # 2️⃣ Optional: Stop the reader to ensure it is idle
-        reader.stop()
+        # reader.stop()
 
-        # 3️⃣ Query device information (optional)
-        # reader.query_info()
+        # # 3️⃣ Query device information (optional)
+        # # reader.query_info()
 
-        # 4️⃣ Query baseband version (optional)
-        # reader.query_baseband_version()
+        # # 4️⃣ Query baseband version (optional)
+        # # reader.query_baseband_version()
 
-        # 5️⃣ Query current baudrate
-        reader.query_baudrate()
+        # # 5️⃣ Query current baudrate
+        # reader.query_baudrate()
 
-        # 6️⃣ Set antenna power (example: Antenna 1 at 30 dBm)
-        reader.set_power({
-            1: 20,  # Example: Antenna 1 at 20 dBm
-        }, persistent=True)
 
-        # 7️⃣ Start inventory
-        print("🛰️ Starting inventory... Waiting for RFID tags.")
-        reader.start_inventory()
+        # # Set the power for antenna 1 to 30 dBm, antenna 2 to 25 dBm
+        # power_settings = {
+        #     1: 30,  # Antenna 1 at 30 dBm
+        #     2: 25,  # Antenna 2 at 25 dBm
+        # }
 
-        # 8️⃣ Continuously read EPC tags in a loop, based on continue_inventory flag
-        while continue_inventory:
-            reader.read_epc_tag() # Keep reading EPC tags
+        # reader.set_antenna_power(power_settings, persistent=True)
 
-            # Check the condition for stopping inventory (e.g., stop after some time or condition)
-            # Example condition to stop inventory after 10 seconds
-            time.sleep(10)  # Adjust the sleep time as needed
-            continue_inventory = False  # Set to False to stop the inventory loop after 10 seconds
-            print("⏹️ Stopping inventory after 10 seconds.")
+
+        # # 7️⃣ Start inventory
+        # print("🛰️ Starting inventory... Waiting for RFID tags.")
+        # # reader.start_inventory()
+
+        # # Simulated data frame with MID=0x00 for EPC tag upload
+
+        # reader.read_epc_tag() # Keep reading EPC tags
+
+        # print("⏹️ Stopping inventory after 10 seconds.")
 
     except KeyboardInterrupt:
         print("⏹️ Inventory stopped by user.")
@@ -54,3 +64,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+

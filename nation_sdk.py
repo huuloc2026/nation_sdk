@@ -92,17 +92,16 @@ class NationReader:
 
     def _send_command(self, mid: int, payload: bytes = b'', desc: str = "", expected_mid: int = None) -> bytes:
         frame = self.build_frame(self.addr, mid, payload)
-        print(f"[SEND] {desc} → {frame.hex()}")
+        print(f"::::[SEND]:::: {desc} → {frame.hex()}")
 
         self.ser.write(frame)
-        time.sleep(0.2)
 
         response = self.ser.read(128)
         if not response:
             print("❌ No response received.")
             return b''
 
-        print(f"[RECV] {response.hex()}")
+        print(f"[RECV] <<<<<<<<<<<<< {response.hex()}")
         if len(response) < 9:  # Minimum length: header(1) + PCW(4) + len(2) + payload(0) + CRC(2)
             print("❌ Response too short.")
             return b''
@@ -112,7 +111,7 @@ class NationReader:
         if recv_crc != calc_crc:
             print(f"⚠️ CRC mismatch: recv={response[-2:].hex()} (→ 0x{recv_crc:04X}), calc={calc_crc:04X}")
 
-        # ✅ Kiểm tra MID
+
         resp_mid = response[6]
         if expected_mid is not None:
             if resp_mid == 0x06:
@@ -216,7 +215,7 @@ class NationReader:
             else:
                 print(f"❌ Set baudrate failed with code {result}")
 
-    def query_power(self):
+    def query_antenna_power(self):
         """
         Truy vấn công suất từng cổng anten hiện tại (tối đa 64).
         """
@@ -239,7 +238,8 @@ class NationReader:
             print(f"  • Antenna {aid}: {pwr} dBm")
         return powers
 
-    def set_power(self, power_dict: dict[int, int], persistent: bool = True):
+
+    def set_antenna_power(self, power_dict: dict[int, int], persistent: bool = True):
         for ant_id, power in power_dict.items():
             if not (1 <= ant_id <= 64):
                 raise ValueError(f"Antenna ID {ant_id} out of range (1–64)")
@@ -248,13 +248,18 @@ class NationReader:
 
         payload = bytearray()
         for ant_id, power in power_dict.items():
+            pid = ant_id
             payload.append(ant_id)
             payload.append(power)
 
-        payload.append(0xFF)
-        payload.append(0x01 if persistent else 0x00)
- 
-        return self._send_command(0x01, payload, desc="Set Power", expected_mid=0x01)
+        # Add the persistence flag (0xFF PID) at the end
+        persistence_value = 0x01 if persistent else 0x00
+        payload.append(0xFF)  # PID for persistence
+        payload.append(persistence_value)  # 1 for save, 0 for not save
+
+        # Send the command to the reader
+        self._send_command(mid=0x01, payload=bytes(payload))  # MID=0x01 for Set Power command
+        print(f"✅ Power configuration sent: {power_dict}, Persistence: {persistent}")
         
     def query_ability(self):
         resp = self._send_command(0x00, b'', desc="Query RFID Ability", expected_mid=0x00)
@@ -292,6 +297,7 @@ class NationReader:
         except Exception as e:
             print(f"❌ Error starting inventory: {e}")
 
+
     def stop_inventory(self):
         try:
             # Send the stop command (MID=0xFF)
@@ -301,6 +307,23 @@ class NationReader:
         except Exception as e:
             print(f"❌ Error stopping inventory: {e}")
 
+
+    def send_read_epc_tag_command(self, antenna_ports: int, read_mode: int = 0):
+        """
+        Send the Read EPC Tag command to the reader.
+        
+        Parameters:
+        antenna_ports (int): The bitmask indicating which antennas to use.
+        read_mode (int): 0 for single read, 1 for continuous read.
+        """
+        # Construct the data parameters
+        data_parameters = bytearray()
+        data_parameters.append(antenna_ports)  # Antenna ports as a bitmask (U32)
+        data_parameters.append(read_mode)  # Reading mode (single or continuous read)
+
+        # Send the frame with MID=0x10 (Read EPC Tag)
+        self.send_command(mid=0x10, payload=bytes(data_parameters))
+        print(f"✅ Sent Read EPC Tag command with antenna ports {antenna_ports} and mode {read_mode}")
 
     def read_epc_tag(self):
         try:
@@ -316,7 +339,8 @@ class NationReader:
                     print(f"✅ Received data: {response.hex()}")
 
                     # Parse EPC data from the response (MID=0x00 for tag data)
-                    epc_data = self.parse_inventory_data(response)
+                    #TODO:
+                    epc_data = self.parse_inventory_dataV2(response)
                     if epc_data:
                         print(f"🎯 EPC Data: {epc_data}")
                     else:
@@ -348,11 +372,103 @@ class NationReader:
             print(f"❌ Lỗi khi phân tích dữ liệu: {e}")
             return {}
 
+
+    def parse_inventory_dataV2(self, data: bytes) -> Dict[str, Any]:
+        try:
+            results = []  # List to hold multiple frames' data
+            idx = 0  # Start index to process the data
+            
+            while idx < len(data):
+                # Ensure the frame starts with the correct header (0x5A)
+                if data[idx] != 0x5A:
+                    print(f"❌ Invalid frame header at index {idx}.")
+                    break
+
+                # Move past the Frame Header (1 byte)
+                idx += 1
+
+                # Protocol Control Word (PCW) is 4 bytes
+                pcw = data[idx:idx + 4]
+                idx += 4
+
+                # Data Length (2 bytes, U16 in big-endian format)
+                data_length = int.from_bytes(data[idx:idx + 2], 'big')
+                idx += 2
+
+                # Data Parameters (this is where the EPC tag is located)
+                data_parameters = data[idx:idx + data_length]
+                idx += data_length
+
+                # CRC (2 bytes, U16)
+                crc = data[idx:idx + 2]
+                idx += 2
+
+                # Now parse the EPC tag data (first parameter is EPC code length)
+                if len(data_parameters) < 2:
+                    print("❌ Data parameters too short to read EPC length.")
+                    break
+                
+                # Read the EPC length (2 bytes, U16)
+                epc_length = int.from_bytes(data_parameters[:2], 'big')  # Read EPC length (U16)
+                print(f"Debug: EPC Length = {epc_length}")
+
+                # Ensure EPC length is valid and does not exceed the available data
+                if len(data_parameters) < 2 + epc_length:
+                    print(f"❌ EPC length exceeds available data. Expected: {2 + epc_length}, but got: {len(data_parameters)}")
+                    break
+
+                # The EPC code is the next 'epc_length' bytes
+                epc_code = data_parameters[2:2 + epc_length]
+
+                # Convert EPC to human-readable hex format
+                epc_str = epc_code.hex().upper()
+
+                # Parse other mandatory parameters (Tag PC, Antenna ID)
+                if len(data_parameters) < 4 + epc_length:
+                    print(f"❌ Data parameters too short to read Tag PC and Antenna ID.")
+                    break
+
+                tag_pc = int.from_bytes(data_parameters[2 + epc_length:4 + epc_length], 'big')
+                antenna_id = data_parameters[4 + epc_length]
+
+                # Store the parsed data
+                result = {
+                    "EPC": epc_str,
+                    "Tag PC": tag_pc,
+                    "Antenna ID": antenna_id
+                }
+
+                # Optionally, extract other optional parameters (if any)
+                optional_parameters = {}
+                idx = 4 + epc_length + 1  # Move past Tag PC and Antenna ID
+                while idx < len(data_parameters):
+                    pid = data_parameters[idx]
+                    idx += 1
+                    length = data_parameters[idx]
+                    idx += 1
+                    value = data_parameters[idx:idx + length]
+                    idx += length
+                    optional_parameters[pid] = value.hex().upper()
+
+                # Add optional parameters to result
+                result["Optional Parameters"] = optional_parameters
+
+                # Add this frame's result to the overall results list
+                results.append(result)
+
+            # Return all parsed results for the frames
+            return results
+
+        except Exception as e:
+            print(f"❌ Error parsing data: {e}")
+            return {}
+
+
     def get_available_ports() -> List[str]:
         """
         Trả về danh sách các cổng serial hiện có (USB, ACM, COM).
         Dùng cho việc gợi ý chọn cổng thiết bị đọc RFID.
-        """
+        """ 
         ports = serial.tools.list_ports.comports()
         return [port.device for port in ports]
 
