@@ -1,58 +1,56 @@
 from nation_sdk import NationReader
+import time
 
 def main():
     port = "/dev/ttyUSB0"
-    baudrate = 9600
-    reader = NationReader(port,baudrate=baudrate)
-    
+    baudrate = 115200
+    reader = NationReader(port, baudrate=baudrate)
+
+    continue_inventory = True  # Boolean flag to control the inventory process
+
     try:
+        # 1️⃣ Connect to the reader
         reader.connect()
 
-        # # # 1️⃣ STOP để chuyển về IDLE
+        # 2️⃣ Optional: Stop the reader to ensure it is idle
         reader.stop()
 
-        # # # 2️⃣ Query thông tin thiết bị
-        reader.query_info()
+        # 3️⃣ Query device information (optional)
+        # reader.query_info()
 
-        # # # 3️⃣ Query phiên bản baseband
-        reader.query_baseband_version()
+        # 4️⃣ Query baseband version (optional)
+        # reader.query_baseband_version()
 
-        # # # 4️⃣ Query baudrate hiện tại
+        # 5️⃣ Query current baudrate
         reader.query_baudrate()
 
-        # # # 5️⃣ Đặt baudrate nếu cần (2 = 115200)
-        reader.set_baudrate(0)
-
-        # # # 6️⃣ Cấu hình công suất antenna
+        # 6️⃣ Set antenna power (example: Antenna 1 at 30 dBm)
         reader.set_power({
-            1: 30,
-
+            1: 20,  # Example: Antenna 1 at 20 dBm
         }, persistent=True)
 
+        # 7️⃣ Start inventory
+        print("🛰️ Starting inventory... Waiting for RFID tags.")
+        reader.start_inventory()
 
-        
-        # # 7️⃣ Bắt đầu inventory
-        if reader.start_inventory():
-            print("🛰️ Inventory running... Đang chờ thẻ RFID")
+        # 8️⃣ Continuously read EPC tags in a loop, based on continue_inventory flag
+        while continue_inventory:
+            reader.read_epc_tag() # Keep reading EPC tags
 
-            while True:
-                response = reader.ser.read(128)
-                if not response or len(response) < 8:
-                    continue
+            # Check the condition for stopping inventory (e.g., stop after some time or condition)
+            # Example condition to stop inventory after 10 seconds
+            time.sleep(10)  # Adjust the sleep time as needed
+            continue_inventory = False  # Set to False to stop the inventory loop after 10 seconds
+            print("⏹️ Stopping inventory after 10 seconds.")
 
-                mid = response[6]
-                if mid == 0x10:  # Inventory data
-                    payload = response[7:-2]
-                    tag_list = reader.parse_inventory_data(list(payload))
-                    for tag in tag_list:
-                        print(f"🎯 EPC: {tag['epc']}  RSSI: {tag['rssi']} dBm")
-                        
     except KeyboardInterrupt:
         print("⏹️ Inventory stopped by user.")
     except Exception as e:
         print(f"❌ Error: {e}")
     finally:
+        # Clean up and close the connection
         reader.close()
+        print("🔌 Connection closed.")
 
 if __name__ == "__main__":
     main()

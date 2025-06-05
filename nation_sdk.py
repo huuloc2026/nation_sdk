@@ -5,7 +5,7 @@ from typing import List, Dict, Any, Callable
 
 
 class NationReader:
-    def __init__(self, port: str, baudrate: int = 9600):
+    def __init__(self, port: str, baudrate: int = 115200):
         self.port = port
         self.baudrate = baudrate
         self.ser: serial.Serial | None = None
@@ -103,7 +103,9 @@ class NationReader:
             return b''
 
         print(f"[RECV] {response.hex()}")
-
+        if len(response) < 9:  # Minimum length: header(1) + PCW(4) + len(2) + payload(0) + CRC(2)
+            print("❌ Response too short.")
+            return b''
         # ✅ Đọc CRC theo MSB-first
         recv_crc = int.from_bytes(response[-2:], 'big')
         calc_crc = self.crc16_ccitt_msb(response[1:-2])
@@ -266,33 +268,85 @@ class NationReader:
             print("❌ Failed to read RFID ability.")
             return None
 
-    # def start_inventory(self):
-    #     response = self._send_command(
-    #         mid=0x10,
-    #         payload=b'',
-    #         desc="Start Inventory",
-    #         expected_mid=0x10
-    #     )
 
-    #     if not response:
-    #         print("❌ No response from reader when starting inventory.")
-    #         return False
+    def start_inventory(self):
+        try:
+            # Stop the reader to ensure it's in the Idle state
+            stop_command = self.build_frame(self.addr, mid=0xFF)  # Stop command (MID=0xFF)
+            self.ser.write(stop_command)
+            time.sleep(0.2)
 
-    #     resp_mid = response[6]
-    #     if resp_mid == 0x06:
-    #         status_code = response[-3]
-    #         if status_code == 0x00:
-    #             print("✅ Inventory started (status OK).")
-    #             return True
-    #         else:
-    #             print(f"❌ Failed to start inventory, status code = 0x{status_code:02X}")
-    #             return False
-    #     elif resp_mid == 0x10:
-    #         print("✅ Inventory started (MID=0x10 acknowledged).")
-    #         return True
-    #     else:
-    #         print(f"ℹ️ Inventory response MID = 0x{resp_mid:02X} (not standard 0x10) → continue anyway.")
-    #         return True
+            # Build the start inventory command (MID=0x10)
+            # Example parameters: antenna 1 enabled, continuous read mode
+            antenna_port = 0x01  # Bitmask for antenna 1
+            read_mode = 1  # Continuous read mode
+
+            # Construct the data payload (antenna port + read mode)
+            payload = struct.pack('>I', antenna_port) + struct.pack('>B', read_mode)
+
+            # Send the start inventory command
+            start_inventory_command = self.build_frame(self.addr, mid=0x10, payload=payload)
+            self.ser.write(start_inventory_command)
+            print("✅ Inventory started.")
+
+        except Exception as e:
+            print(f"❌ Error starting inventory: {e}")
+
+    def stop_inventory(self):
+        try:
+            # Send the stop command (MID=0xFF)
+            stop_command = self.build_frame(self.addr, mid=0xFF)
+            self.ser.write(stop_command)
+            print("✅ Inventory stopped.")
+        except Exception as e:
+            print(f"❌ Error stopping inventory: {e}")
+
+
+    def read_epc_tag(self):
+        try:
+            # Start the inventory process
+            self.start_inventory()
+
+            # Wait for the tag data (notification from reader)
+            while True:
+                # Read the response (up to 128 bytes in each response)
+                response = self.ser.read(128)
+
+                if response:
+                    print(f"✅ Received data: {response.hex()}")
+
+                    # Parse EPC data from the response (MID=0x00 for tag data)
+                    epc_data = self.parse_inventory_data(response)
+                    if epc_data:
+                        print(f"🎯 EPC Data: {epc_data}")
+                    else:
+                        print("❌ No EPC data found.")
+                else:
+                    print("❌ No response received.")
+                
+                time.sleep(0.5)  # Adjust timing as needed
+        except Exception as e:
+            print(f"❌ Error reading EPC tag: {e}")
+
+    def parse_inventory_data(self, data: bytes) -> Dict[str, Any]:
+        try:
+
+            # Bỏ qua 7 byte đầu (header và protocol control word)
+            epc_start_index = 7
+            
+            # Giả sử EPC có chiều dài 12 byte (96-bit)
+            epc_length = 12  # EPC thường có 12 byte, có thể thay đổi tùy theo cấu hình
+
+            # Lấy dữ liệu EPC từ dữ liệu raw (bắt đầu từ vị trí epc_start_index)
+            epc = data[epc_start_index:epc_start_index + epc_length]
+
+            # Chuyển EPC thành chuỗi hex để dễ đọc
+            epc_str = epc.hex().upper()
+
+            return {"EPC": epc_str}
+        except Exception as e:
+            print(f"❌ Lỗi khi phân tích dữ liệu: {e}")
+            return {}
 
     def get_available_ports() -> List[str]:
         """
@@ -302,139 +356,3 @@ class NationReader:
         ports = serial.tools.list_ports.comports()
         return [port.device for port in ports]
 
-    def detect_nation_reader(baudrate: int = 9600, timeout: float = 0.3) -> str | None:
-        """
-        Tìm và trả về cổng serial của thiết bị Nation RFID (nếu tìm được).
-        Kiểm tra bằng phản hồi hợp lệ từ query_info().
-        """
-        ports = get_available_ports()
-        print(f"🔍 Đang kiểm tra {len(ports)} cổng serial...")
-
-        for port in ports:
-            try:
-                ser = serial.Serial(port, baudrate=baudrate, timeout=timeout)
-                frame = NationReader.build_frame(0x00, 0x00, b'')  # MID=0x00 → Query Info
-                ser.write(frame)
-                time.sleep(0.2)
-                resp = ser.read(128)
-                ser.close()
-
-                if resp and len(resp) > 12 and resp[6] == 0x00:
-                    print(f"✅ Phát hiện thiết bị Nation tại {port}")
-                    return port
-            except Exception as e:
-                print(f"⚠️ Lỗi khi kiểm tra {port}: {e}")
-
-        print("❌ Không phát hiện được thiết bị Nation.")
-        return None
-
-
-    def start_inventory(self):
-        response = self._send_command(
-            mid=0x10,
-            payload=b'',
-            desc="Start Inventory",
-            expected_mid=None  # Chấp nhận MID=0x06 hoặc MID=0x10 hoặc không có phản hồi
-        )
-
-        if not response:
-            print("❌ No response from reader when starting inventory.")
-            return False
-
-        resp_mid = response[6]
-        if resp_mid == 0x06:
-            status_code = response[-3]
-            if status_code == 0x00:
-                print("✅ Inventory started (MID=0x06 OK).")
-                return True
-            else:
-                print(f"❌ Failed to start inventory, status code = 0x{status_code:02X}")
-                return False
-        elif resp_mid == 0x10:
-            print("✅ Inventory started (MID=0x10 acknowledged).")
-            return True
-        else:
-            print(f"ℹ️ Inventory response MID = 0x{resp_mid:02X} (not standard) → continue anyway.")
-            return True
-
-    def read_tags_loop(self):
-        print("📡 Listening for tag data (MID=0x10)... Press Ctrl+C to stop.")
-        while True:
-            response = self.ser.read(128)
-            if not response:
-                continue
-
-            print(f"[RECV] {response.hex()}")
-
-            if len(response) >= 8 and response[6] == 0x10:
-                payload = response[7:-2]
-                tag_list = self.parse_inventory_data(list(payload))
-                for tag in tag_list:
-                    print(f"📦 Tag: EPC={tag['epc']}, RSSI={tag['rssi']}")
-
-    def callback_on_new_tag(self, callback: Callable[[Dict[str, Any]], None]):
-        self.start_inventory()
-        while True:
-            response = self.ser.read(128)
-            if response and len(response) >= 8 and response[6] == 0x10:
-                payload = response[7:-2]
-                tag_list = self.parse_inventory_data(list(payload))
-                for tag in tag_list:
-                    callback(tag)
-    
-    def set_rf_band(self, band_code: int, persistent: bool = True):
-        """
-        Cấu hình dải tần làm việc: FCC, ETSI, JP, ...
-        band_code: 0 (China 920–925), 3 (FCC 902–928), 4 (ETSI), v.v...
-        persistent: True nếu muốn lưu sau khi tắt nguồn.
-        """
-        if not (0 <= band_code <= 8):
-            raise ValueError("Invalid band code")
-
-        payload = bytearray()
-        payload.append(band_code)
-        payload.append(0x01 if persistent else 0x00)
-
-        resp = self._send_command(0x03, payload, desc=f"Set RF Band (Code={band_code})", expected_mid=0x03)
-        if resp:
-            print("✅ RF band set successfully.")
-
-    def parse_inventory_data(self, data: List[int]) -> List[Dict[str, Any]]:
-        tags = []
-        idx = 0
-        while idx + 6 < len(data):
-            try:
-                epc_len = data[idx]
-                block = data[idx + 1: idx + 1 + epc_len]
-                if len(block) < 5:
-                    break
-                pc = block[0:2]
-                epc = block[2:-1]
-                rssi = block[-1]
-                tags.append({
-                    "pc": ''.join(f'{b:02X}' for b in pc),
-                    "epc": ''.join(f'{b:02X}' for b in epc),
-                    "rssi": rssi
-                })
-                idx += 1 + epc_len
-            except Exception as e:
-                print(f"⚠️ Parse error: {e}")
-                break
-        return tags
-
-    def set_upload_filter(self, rssi_threshold: int = 0, repeat_time_ms: int = 0):
-        if not (0 <= rssi_threshold <= 255):
-            raise ValueError("RSSI must be 0–255")
-        if not (0 <= repeat_time_ms <= 655350):
-            raise ValueError("repeat_time_ms quá lớn")
-
-        repeat_units = repeat_time_ms // 10
-        repeat_bytes = repeat_units.to_bytes(2, 'big')
-        payload = bytearray()
-        payload.extend([0x01])            # PID: repeat time
-        payload.extend(repeat_bytes)     # repeat time in 10ms units
-        payload.extend([0x02, rssi_threshold])  # PID: RSSI
-
-        resp = self._send_command(0x09, payload, desc="Set Upload Filter", expected_mid=0x09)
-        if resp:
-            print("✅ Upload filter set.")
