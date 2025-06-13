@@ -1,7 +1,7 @@
 import serial 
 import time
 import os
-COM_PORT = "/dev/ttyUSB0"
+COM_PORT = "/dev/ttyUSB1"
 BAUD_RATE = 9600
 #FILE_PATH = r"C:\Temp\Label_output.ezpl"
 label_data = """
