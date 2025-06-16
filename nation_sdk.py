@@ -3,7 +3,7 @@ import struct
 import time
 import threading
 from enum import IntEnum, unique
-from typing import Callable, Optional
+from typing import Callable, Optional,Tuple
 
 # === Constants ===
 CRC16_CCITT_INIT = 0x0000
@@ -17,8 +17,6 @@ PROTO_VER = 0x01
 RS485_FLAG = 0x00 
 
 READER_NOTIFY_FLAG = 0x00  # Set to 0 for upper computer commands
-
-
 
 
 PROTO_TYPE = 0x00
@@ -38,6 +36,8 @@ class UARTConnection:
         self.timeout = timeout
         self.ser = None
         self.lock = threading.Lock()
+        self._inventory_running = False
+        self._inventory_thread = None
 
     def open(self):
         """
@@ -119,20 +119,22 @@ class MID(IntEnum):
     CONFIRM_CONNECTION = 0x12
     # RFID Inventory
     READ_EPC_TAG = (0x02 << 8) | 0x10
-    STOP_OPERATION = 0xFF
     EPC_UPLOAD = 0x0000    # Notification from reader
     READ_END = 0x0001      # Notification of end
 
     STOP_INVENTORY = (0x02 << 8) | 0xFF
+    STOP_OPERATION = 0x0101
 
     # RFID Baseband
     CONFIG_BASEBAND = 0x0B00
     QUERY_BASEBAND = 0x0C00
     # Power Control
-    CONFIG_POWER = 0x0100
-    QUERY_POWER = 0x0200
+    CONFIGURE_READER_POWER = 0x0101
+    QUERY_READER_POWER = 0x0102
+    SET_READER_POWER_CALIBRATION = 0x0103
     # RFID Capability
     QUERY_RFID_ABILITY = 0x0500
+
 
 class NationReader:
     DEFAULT_PORT = "/dev/ttyUSB0"
@@ -163,16 +165,16 @@ class NationReader:
     def receive(self, size: int) -> bytes:
         return self.uart.receive(size)
 
-    def build_frame(self, mid: int, payload: bytes) -> bytes:
-        pcw = (PROTO_TYPE << 24) | (PROTO_VER << 16) | (0x10 << 8) | mid
-        frame = bytearray()
-        frame.append(FRAME_HEADER)
-        frame += pcw.to_bytes(4, 'big')
-        frame += len(payload).to_bytes(2, 'big')
-        frame += payload
-        crc = self.calc_crc(bytes(frame))
-        frame += crc.to_bytes(2, 'big')
-        return bytes(frame)
+    # def build_frame(self, mid: int, payload: bytes) -> bytes:
+    #     pcw = (PROTO_TYPE << 24) | (PROTO_VER << 16) | (0x10 << 8) | mid
+    #     frame = bytearray()
+    #     frame.append(FRAME_HEADER)
+    #     frame += pcw.to_bytes(4, 'big')
+    #     frame += len(payload).to_bytes(2, 'big')
+    #     frame += payload
+    #     crc = self.calc_crc(bytes(frame))
+    #     frame += crc.to_bytes(2, 'big')
+    #     return bytes(frame)
 
 
     # def parse_frame(self, raw: bytes) -> dict:
@@ -209,39 +211,30 @@ class NationReader:
 
     @classmethod
     def build_frame(cls, mid, payload: bytes = b"", rs485: bool = False, notify: bool = False) -> bytes:
-        """
-        Constructs a complete command frame for UART transmission.
-        :param mid: Message ID (int or MID enum)
-        :param payload: Command payload
-        :param rs485: True to include device address field
-        :param notify: True if this is a reader-originated notification
-        :return: Complete frame as bytes
-        """
         frame_header = b'\x5A'
 
-        # Allow either Enum or int for `mid`
         mid_value = getattr(mid, 'value', mid)
         category = (mid_value >> 8) & 0xFF
         mid_code = mid_value & 0xFF
 
-        # === Protocol Control Word (PCW) ===
-        pcw = (PROTO_TYPE << 24) | (PROTO_VER << 16)
-        if rs485:
-            pcw |= (1 << 13)
-        if notify:
-            pcw |= (1 << 12)
-        pcw |= (category << 8) | mid_code
+        pcw = cls.build_pcw(category, mid_code, rs485=rs485, notify=notify)
         pcw_bytes = pcw.to_bytes(4, 'big')
-
-        # === Address (RS485 only) ===
         addr_bytes = b'\x00' if rs485 else b''
-
-        # === Length and CRC ===
         length_bytes = len(payload).to_bytes(2, 'big')
         frame_content = pcw_bytes + addr_bytes + length_bytes + payload
         crc_bytes = cls.crc16_ccitt(frame_content).to_bytes(2, 'big')
 
         return frame_header + frame_content + crc_bytes
+
+    @classmethod
+    def build_pcw(cls, category: int, mid: int, rs485=False, notify=False) -> int:
+        pcw = (PROTO_TYPE << 24) | (PROTO_VER << 16)
+        if rs485:
+            pcw |= (1 << 13)
+        if notify:
+            pcw |= (1 << 12)
+        pcw |= (category << 8) | mid
+        return pcw
 
     @classmethod
     def parse_frame(cls, raw: bytes) -> dict:
@@ -314,8 +307,34 @@ class NationReader:
             "crc": received_crc,
             "raw": raw
         }
-
     
+    @staticmethod
+    def extract_valid_frames(raw: bytes) -> list[bytes]:
+        frames = []
+        i = 0
+        while i < len(raw) - 10:
+            if raw[i] != 0x5A:
+                i += 1
+                continue
+            try:
+                pcw = int.from_bytes(raw[i+1:i+5], 'big')
+                rs485_flag = (pcw >> 13) & 0x01
+                addr_len = 1 if rs485_flag else 0
+                len_offset = i + 5 + addr_len
+                data_len = int.from_bytes(raw[len_offset:len_offset+2], 'big')
+
+                total_len = 1 + 4 + addr_len + 2 + data_len + 2
+                if i + total_len > len(raw):
+                    break  # Not enough data
+
+                frame = raw[i:i+total_len]
+                frames.append(frame)
+                i += total_len
+            except Exception:
+                i += 1
+                continue
+
+        return frames
 
     def Connect_Reader_And_Initialize(self) -> bool:
         try:
@@ -327,6 +346,8 @@ class NationReader:
 
             time.sleep(0.1)
             raw = self.uart.receive(64)
+
+      
             if not raw:
                 print("❌ No response received.")
                 return False
@@ -357,7 +378,6 @@ class NationReader:
                     crc = (crc << 1) & 0xFFFF
         return crc
 
-
     def Query_Reader_Information(self) -> dict:
         """
         Sends MID=0x00 Category=0x01 'Query Reader Information' and parses the response.
@@ -375,8 +395,10 @@ class NationReader:
                 return {}
 
             frame_data = self.parse_frame(raw)
-            print(f"📦 Raw: {raw.hex()}")
-            print(f"🔍 Parsed MID: {frame_data['mid']:02X}, CAT: {frame_data['category']:02X}")
+
+            # print(f"📥 RAW: {raw.hex()}")
+            # print(f"🧩 Frame Data: {frame_data}")
+
 
             if frame_data['mid'] != 0x00 or frame_data['category'] != 0x01:
                 print("❌ Unexpected MID or Category.")
@@ -390,52 +412,49 @@ class NationReader:
 
     @staticmethod
     def _parse_query_info_data(data: bytes) -> dict:
-        """
-        Parses the payload of the Query Reader Information response.
-        """
         result = {}
         try:
             offset = 0
 
-            # Serial Number (fixed 21 ASCII bytes)
-            serial = data[offset:offset+21].decode('ascii', errors='ignore')
-            result['serial_number'] = serial.strip()
-            offset += 21
-
-            # Power-on time (U32)
-            if offset + 4 > len(data):
-                result['power_on_time_sec'] = None
+            # 1. Serial Number (next byte is length)
+            if offset + 2 > len(data):
                 return result
-            result['power_on_time_sec'] = int.from_bytes(data[offset:offset+4], 'big')
+            sn_length = data[offset + 1]
+            serial = data[offset + 2:offset + 2 + sn_length].decode('ascii', errors='ignore')
+            result['serial_number'] = serial.strip()
+            offset += 2 + sn_length
+
+            # 2. Power-on time (U32)
+            if offset + 4 > len(data):
+                return result
+            result['power_on_time_sec'] = int.from_bytes(data[offset:offset + 4], 'big')
             offset += 4
 
-            # Baseband compile time (ASCII, until optional tag or end)
-            optional_tags = {0x01, 0x02, 0x03}
-            bb_end = offset
-            while bb_end < len(data) and data[bb_end] not in optional_tags:
-                bb_end += 1
-            baseband_time = data[offset:bb_end].decode('ascii', errors='ignore')
-            result['baseband_compile_time'] = baseband_time.strip()
-            offset = bb_end
+            # 3. Baseband compile time (tag 0x00, then length, then ASCII string)
+            if offset + 2 > len(data):
+                return result
+            bb_len = data[offset + 1]
+            baseband = data[offset + 2:offset + 2 + bb_len].decode('ascii', errors='ignore')
+            result['baseband_compile_time'] = baseband.strip()
+            offset += 2 + bb_len
 
-            # Optional parameters
-            while offset < len(data):
+            # 4. Optional tags (0x01: app_version, 0x02: os_version, 0x03: app_compile_time)
+            optional_tags = {0x01, 0x02, 0x03}
+            while offset + 2 <= len(data):
                 tag = data[offset]
-                offset += 1
-                if tag == 0x01 and offset + 4 <= len(data):
-                    version = int.from_bytes(data[offset:offset+4], 'big')
-                    result['app_version'] = f"V{(version>>24)&0xFF}.{(version>>16)&0xFF}.{(version>>8)&0xFF}.{version&0xFF}"
-                    offset += 4
-                elif tag in (0x02, 0x03):
-                    start = offset
-                    while offset < len(data) and data[offset] not in optional_tags:
-                        offset += 1
-                    val = data[start:offset].decode('ascii', errors='ignore')
-                    key = 'os_version' if tag == 0x02 else 'app_compile_time'
-                    result[key] = val.strip()
+                length = data[offset + 1]
+                value = data[offset + 2:offset + 2 + length]
+                offset += 2 + length
+
+                if tag == 0x01 and len(value) == 4:
+                    v = int.from_bytes(value, 'big')
+                    result['app_version'] = f"V{(v>>24)&0xFF}.{(v>>16)&0xFF}.{(v>>8)&0xFF}.{v&0xFF}"
+                elif tag == 0x02:
+                    result['os_version'] = value.decode('ascii', errors='ignore').strip()
+                elif tag == 0x03:
+                    result['app_compile_time'] = value.decode('ascii', errors='ignore').strip()
                 else:
-                    result[f'unknown_tag_0x{tag:02X}'] = True
-                    break
+                    continue
 
         except Exception as e:
             result['error'] = f"Parsing exception: {e}"
@@ -469,15 +488,15 @@ class NationReader:
             return {"error": f"Parse error: {e}"}
 
 
-
     def start_inventory(self):
+        self._inventory_running = True
         payload = self.build_epc_read_payload()
         frame = self.build_frame(mid=MID.READ_EPC_TAG, payload=payload)
         self.send(frame)
         print("🚀 Inventory started")
 
         def receive_loop():
-            while True:
+            while self._inventory_running:
                 try:
                     raw = self.receive(64)
                     if not raw:
@@ -498,36 +517,251 @@ class NationReader:
                     # print(f"⚠️ Error during receive: {e}")
                     continue
 
-        threading.Thread(target=receive_loop, daemon=True).start()
+        self._inventory_thread = threading.Thread(target=receive_loop, daemon=True)
+        self._inventory_thread.start()
 
 
-        
     def stop_inventory(self):
-        frame = self.build_frame(mid=MID.STOP_OPERATION, payload=b'')
-        self.send(frame)
-        print("🛑 Sending STOP command...")
+        print("🛑 Gửi lệnh STOP (MID=0xFF)...")
 
-        # Retry receive until valid frame is parsed
-        raw = None
-        for attempt in range(5):  # max 5 retries
-            try:
-                raw = self.receive(64)
-                if not raw:
-                    time.sleep(0.1)
-                    continue
-                resp = self.parse_frame(raw)
+        self.uart.flush_input()
+        stop_frame = self.build_frame(mid=MID.STOP_OPERATION, payload=b'')
+        print(f"➡️ STOP Frame: {stop_frame.hex()}")
+        self.send(stop_frame)
 
-                if resp.get('mid') == MID.STOP_OPERATION and resp['data'] and resp['data'][0] == 0:
-                    print("✅ Inventory stopped successfully")
-                    return
+        for attempt in range(10):
+            time.sleep(0.2)
+            raw = self.receive(256)
+            frames = self.extract_valid_frames(raw)
+            print(f"📥 [{attempt+1}] Nhận {len(raw)} byte, {len(frames)} frame hợp lệ")
+
+            for idx, f in enumerate(frames):
+                try:
+                    resp = self.parse_frame(f)
+                    mid = resp["mid"]
+                    data = resp["data"]
+
+                    if mid == MID.STOP_OPERATION:
+                        code = data[0] if data else -1
+                        if code == 0x00:
+                            print("✅ STOP thành công – Reader ở trạng thái IDLE")
+                            return True
+                        else:
+                            print(f"⚠️ STOP lỗi với mã: {code:#02x}")
+                            return False
+
+                    elif mid == MID.READ_END:
+                        reason = data[0] if data else -1
+                        print(f"✅ Inventory ended. Reason: {reason}")
+                        return True  # <== Đây là điểm thay đổi
+
+                    else:
+                        print(f"↪️ Bỏ qua MID={mid:#02x}")
+
+                except Exception as e:
+                    print(f"❌ Lỗi phân tích frame {idx}: {e}")
+
+        print("❌ Không nhận được phản hồi STOP hoặc END sau 10 lần thử")
+        return False
+
+
+    #NEED TODO:
+
+    def set_power(self, ant: int, power: int, persist: bool = False) -> bool:
+        if not (1 <= ant <= 64):
+            raise ValueError("Invalid antenna index (1–64)")
+        if not (0 <= power <= 36):
+            raise ValueError("Power must be between 0 and 36 dBm")
+
+        self.uart.flush_input()
+
+        # === Build TLV payload ===
+        payload = bytearray()
+        payload += bytes([ant, 1, power])  # [PID][LEN=1][VALUE=power]
+        if persist:
+            payload += bytes([0xFF, 1, 1])  # [PID=0xFF][LEN=1][VALUE=1]
+
+        frame = self.build_frame(mid=0x1001, payload=payload)
+        self.uart.send(frame)
+        time.sleep(0.1)
+
+        raw = self.uart.receive(128)
+        if not raw:
+            print("❌ No response from reader.")
+            return False
+
+        try:
+            parsed = self.parse_frame(raw)
+            print(f"📥 RAW response: {raw.hex()}")
+            mid_actual = parsed["mid"]
+            cat_actual = parsed["category"]
+            data = parsed["data"]
+
+            print(f"🔍 MID: {mid_actual:02X}, CAT: {cat_actual:02X}")
+            print(f"🔍 DATA: {data.hex()}")
+
+            if cat_actual != 0x10:
+                print(f"⚠️ Unexpected CAT in response: CAT={cat_actual:02X}")
+                return False
+
+            result = self.parse_tlv(data)
+            for pid, val in result.items():
+                print(f"🔧 TLV → PID=0x{pid:02X}, VAL={val.hex()}")
+
+            code = result.get(0x10, b'\xFF')[0]
+            if code == 0:
+                print("✅ Power set successfully.")
+                return True
+            else:
+                print(f"⚠️ Set failed, result code: {code}")
+                return False
+
+        except Exception as e:
+            print(f"❌ Exception during set_power: {e}")
+            return False
+
+
+    def get_power(self, ant: int) -> tuple[bool, int]:
+        """
+        Trả về công suất anten `ant` dưới dạng (success: bool, dBm: int).
+        """
+        if not (1 <= ant <= 64):
+            raise ValueError("Antenna port must be between 1 and 64")
+
+        try:
+            self.uart.flush_input()
+
+            frame = self.build_frame(
+                mid=MID.READER_POWER_QUERY,
+                payload=b'',
+                rs485=False,
+                notify=False
+            )
+            self.uart.send(frame)
+            time.sleep(0.1)
+
+            raw = self.uart.receive(128)
+            if not raw:
+                print("❌ No response for get_power.")
+                return False, -1
+
+            parsed = self.parse_frame(raw)
+            expected_pcw = self.build_pcw(0x02, 0x00)
+            if parsed["pcw"] != expected_pcw:
+                print(f"⚠️ Unexpected PCW: got 0x{parsed['pcw']:08X}, expected 0x{expected_pcw:08X}")
+                return False, -1
+            data = parsed["data"]
+            if not data:
+                print("⚠️ Empty data section in response.")
+                return False, -1
+            print(f"🧪 Raw TLV data: {data.hex()}")
+
+            tlvs = self.parse_tlv(data, debug=True)
+            if ant not in tlvs:
+                print(f"⚠️ Antenna {ant} not found in TLV.")
+                return False, -1
+
+            val = tlvs[ant]
+            if len(val) != 1:
+                print(f"⚠️ PID {ant} returned value with invalid length: {len(val)}")
+                return False, -1
+
+            power = val[0]
+            print(f"✅ Antenna {ant} power: {power} dBm")
+            return True, power
+
+        except Exception as e:
+            print(f"❌ Exception in get_power(): {e}")
+            return False, -1
+
+
+    def query_power_range(self) -> dict:
+        """
+        Queries the reader for supported power range using MID=0x00, CAT=0x05 (Query RFID Ability).
+        Returns:
+            dict: {'min': int, 'max': int, 'step': int} or error message.
+        """
+        try:
+            self.uart.flush_input()
+            frame = self.build_frame(MID.QUERY_RFID_ABILITY, payload=b'')
+            self.uart.send(frame)
+
+            raw = self.uart.receive(256)
+            print(f"📥 RAW: {raw.hex()}")
+            frame_data = self.parse_frame(raw)
+            print(f"🧩 PCW: 0x{frame_data['pcw']:08X}")
+            print(f"📏 Data Length: {len(frame_data['data'])}")
+
+            if frame_data['mid'] != 0x00 or frame_data['category'] != 0x05:
+                print(f"⚠️ Unexpected MID/CAT: MID={frame_data['mid']:02X}, CAT={frame_data['category']:02X}")
+                return {}
+
+            data = frame_data['data']
+            i = 0
+            result = {}
+
+            while i + 2 <= len(data):
+                pid = data[i]
+                length = data[i + 1]
+                if i + 2 + length > len(data):
+                    print(f"⚠️ Incomplete TLV at byte {i}: PID=0x{pid:02X}, LEN={length}")
+                    break
+                value = data[i + 2:i + 2 + length]
+
+                if pid == 0x01 and length == 1:
+                    result['max'] = value[0]
+                elif pid == 0x02 and length == 1:
+                    result['min'] = value[0]
+                elif pid == 0x03 and length == 1:
+                    result['step'] = value[0]
                 else:
-                    print(f"❌ Unexpected response: MID={resp.get('mid')}, Data={resp.get('data')}")
-                    return
-            except ValueError as ve:
-                print(f"⚠️ Frame error on stop: {ve} → Retrying...")
-                time.sleep(0.1)
-            except Exception as e:
-                print(f"❌ Unexpected error: {e}")
+                    print(f"⚠️ Unknown PID or bad length: PID=0x{pid:02X}, LEN={length}")
+                i += 2 + length
+
+            if 'min' in result and 'max' in result and 'step' in result:
+                print(f"✅ Power range: {result['min']}–{result['max']} dBm, step {result['step']} dB")
+                return result
+            else:
+                print("⚠️ Could not determine full power range.")
+                return result
+
+        except Exception as e:
+            print(f"❌ Exception during power range query: {e}")
+            return {}
+
+
+
+    def parse_tlv(self, data: bytes) -> dict[int, bytes]:
+        result = {}
+        i = 0
+        while i + 2 <= len(data):
+            pid = data[i]
+            length = data[i+1]
+
+            if i + 2 + length > len(data):
+                print(f"⚠️ Incomplete TLV at byte {i}: PID=0x{pid:02X}, LEN={length}")
                 break
 
-        print("❌ Failed to stop inventory after retries")
+            value = data[i+2:i+2+length]
+            result[pid] = value
+            i += 2 + length
+
+        return result
+
+
+    def parse_result_code(data: bytes, expected_pid: int) -> int:
+        result = self.parse_tlv(data)
+        return result.get(expected_pid, b'\xFF')[0]
+        
+    def set_beeper(self, mode: int) -> bool:
+        return self.send_command(0x60, bytes([mode])) is not None
+
+    def get_beeper(self) -> Optional[int]:
+        resp = self.send_command(0x61)
+        if resp and len(resp) >= 1:
+            return resp[0]
+        return None
+ 
+    
+
+    
