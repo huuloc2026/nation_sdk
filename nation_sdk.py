@@ -130,7 +130,7 @@ class MID(IntEnum):
     QUERY_BASEBAND = 0x0C00
     # Power Control
     CONFIGURE_READER_POWER = 0x0101
-    QUERY_READER_POWER = (0x10 << 8) | 0x00
+    QUERY_READER_POWER = 0x1002
     SET_READER_POWER_CALIBRATION = 0x0103
     # RFID Capability
     QUERY_RFID_ABILITY = (0x05 << 8) | 0x00
@@ -138,7 +138,7 @@ class MID(IntEnum):
 
 class NationReader:
     DEFAULT_PORT = "/dev/ttyUSB0"
-    DEFAULT_BAUDRATE = 9600
+    DEFAULT_BAUDRATE = 115200
     DEFAULT_TIMEOUT = 0.5
 
     @classmethod
@@ -152,6 +152,7 @@ class NationReader:
         self.baudrate = baudrate or NationReader.DEFAULT_BAUDRATE
         self.timeout = timeout or NationReader.DEFAULT_TIMEOUT
         self.uart = UARTConnection(self.port, self.baudrate, self.timeout)
+        self.rs485 = False
 
     def open(self):
         self.uart.open()
@@ -165,26 +166,9 @@ class NationReader:
     def receive(self, size: int) -> bytes:
         return self.uart.receive(size)
 
-    # def build_frame(self, mid: int, payload: bytes) -> bytes:
-    #     pcw = (PROTO_TYPE << 24) | (PROTO_VER << 16) | (0x10 << 8) | mid
-    #     frame = bytearray()
-    #     frame.append(FRAME_HEADER)
-    #     frame += pcw.to_bytes(4, 'big')
-    #     frame += len(payload).to_bytes(2, 'big')
-    #     frame += payload
-    #     crc = self.calc_crc(bytes(frame))
-    #     frame += crc.to_bytes(2, 'big')
-    #     return bytes(frame)
+  
 
 
-    # def parse_frame(self, raw: bytes) -> dict:
-    #     if raw[0] != FRAME_HEADER:
-    #         raise ValueError("Invalid frame header")
-    #     pcw = int.from_bytes(raw[1:5], 'big')
-    #     mid = pcw & 0xFF
-    #     data_len = int.from_bytes(raw[5:7], 'big')
-    #     data = raw[7:7 + data_len]
-    #     return {"mid": mid, "data": data}
 
     @staticmethod
     def crc16_ccitt(data: bytes) -> int:
@@ -209,6 +193,9 @@ class NationReader:
         crc = crc16_ccitt(data)
         return crc.to_bytes(2, 'big')  # Big-endian per protocol
 
+
+    
+
     @classmethod
     def build_frame(cls, mid, payload: bytes = b"", rs485: bool = False, notify: bool = False) -> bytes:
         frame_header = b'\x5A'
@@ -221,6 +208,7 @@ class NationReader:
         pcw_bytes = pcw.to_bytes(4, 'big')
         addr_bytes = b'\x00' if rs485 else b''
         length_bytes = len(payload).to_bytes(2, 'big')
+
         frame_content = pcw_bytes + addr_bytes + length_bytes + payload
         crc_bytes = cls.crc16_ccitt(frame_content).to_bytes(2, 'big')
 
@@ -308,33 +296,45 @@ class NationReader:
             "raw": raw
         }
     
-    @staticmethod
-    def extract_valid_frames(raw: bytes) -> list[bytes]:
+        
+    def extract_valid_frames(self, data: bytes) -> list[bytes]:
+        """
+        Extracts all valid protocol frames from raw byte stream based on:
+        - Header = 0x5A
+        - Length field (2 bytes)
+        - CRC16-CCITT check
+        """
         frames = []
         i = 0
-        while i < len(raw) - 10:
-            if raw[i] != 0x5A:
+        while i < len(data):
+            if data[i] != 0x5A:
                 i += 1
                 continue
-            try:
-                pcw = int.from_bytes(raw[i+1:i+5], 'big')
-                rs485_flag = (pcw >> 13) & 0x01
-                addr_len = 1 if rs485_flag else 0
-                len_offset = i + 5 + addr_len
-                data_len = int.from_bytes(raw[len_offset:len_offset+2], 'big')
 
-                total_len = 1 + 4 + addr_len + 2 + data_len + 2
-                if i + total_len > len(raw):
-                    break  # Not enough data
+            # Minimum valid length
+            if i + 9 > len(data):
+                break
 
-                frame = raw[i:i+total_len]
+            length = int.from_bytes(data[i+5:i+7], 'big')
+            addr_len = 1 if self.rs485 else 0
+            full_len = 1 + 4 + addr_len + 2 + length + 2
+
+            if i + full_len > len(data):
+                break
+
+            frame = data[i:i + full_len]
+            crc_calc = self.crc16_ccitt(frame[1:-2])
+            crc_recv = int.from_bytes(frame[-2:], 'big')
+
+            if crc_calc == crc_recv:
                 frames.append(frame)
-                i += total_len
-            except Exception:
-                i += 1
-                continue
+            else:
+                print(f"⚠️ CRC mismatch at index {i}: expected={hex(crc_calc)}, got={hex(crc_recv)}")
+
+            i += full_len
 
         return frames
+
 
     def Connect_Reader_And_Initialize(self) -> bool:
         try:
@@ -366,6 +366,74 @@ class NationReader:
             print(f"❌ Exception during init: {e}")
             return False
 
+    def query_rfid_ability(self) -> dict:
+        """
+        Sends MID=0x00 CAT=0x10 'Query RFID Ability' to get reader capability.
+        Corrects for real-world byte order (MAX first, MIN second).
+        """
+        try:
+            self.uart.flush_input()
+            frame = self.build_frame(mid=0x1000, payload=b'', rs485=self.rs485)
+            self.uart.send(frame)
+
+            time.sleep(0.1)
+            raw = self.uart.receive(128)
+            if not raw:
+                raise Exception("❌ No response from reader.")
+
+            frames = self.extract_valid_frames(raw)
+            print(f"📦 Raw frames count: {len(frames)}")
+
+            for idx, frame in enumerate(frames):
+                print(f"📦 Frame[{idx}]: {frame.hex()}")
+                pcw = int.from_bytes(frame[1:5], 'big')
+                mid = pcw & 0xFF
+                cat = (pcw >> 8) & 0xFF
+                print(f"🔎 MID: {mid:02X}, CAT: {cat:02X}")
+                if cat != 0x10 or mid != 0x00:
+                    continue
+
+                offset = 8 if self.rs485 else 7
+                payload = frame[offset:-2]
+                print(f"🔍 Payload Bytes: {payload.hex()}")
+
+                if len(payload) < 3:
+                    raise Exception("❌ Payload too short.")
+
+                
+                max_power = payload[0]
+                min_power = payload[1]
+                antenna_count = payload[2]
+
+
+                freq_list = []
+                protocols = []
+
+                try:
+                    freq_list_len = payload[3]
+                    freq_list = list(payload[4:4 + freq_list_len])
+                    print(f"📡 Frequency List Length: {freq_list_len}, Data: {freq_list}")
+
+                    protocol_offset = 4 + freq_list_len
+                    protocol_list_len = payload[protocol_offset]
+                    protocols = list(payload[protocol_offset + 1 : protocol_offset + 1 + protocol_list_len])
+                    print(f"📚 Protocol List Length: {protocol_list_len}, Data: {protocols}")
+                except IndexError:
+                    print("ℹ️ Reader reports no frequencies or protocols.")
+
+                return {
+                    "min_power_dbm": min_power,
+                    "max_power_dbm": max_power,
+                    "antenna_count": antenna_count,
+                    "frequencies": freq_list,
+                    "rfid_protocols": protocols
+                }
+
+            raise Exception("❌ No matching response frame for RFID ability.")
+
+        except Exception as e:
+            print(f"❌ Error in query_rfid_ability: {e}")
+            return {}
 
     def calc_crc_ccitt(data: bytes, poly=0x1021, init=0x0000) -> int:
         crc = init
@@ -567,193 +635,154 @@ class NationReader:
 
     #NEED TODO:
 
-    def set_power(self, ant: int, power: int, persist: bool = False) -> bool:
-        if not (1 <= ant <= 64):
-            raise ValueError("Invalid antenna index (1–64)")
-        if not (0 <= power <= 36):
-            raise ValueError("Power must be between 0 and 36 dBm")
+    # def set_power(self, ant: int, power: int, persist: bool = True) -> bool:
+    #     """
+    #     Configures the transmit power for a specific antenna port.
+    #     :param ant: Antenna number (1–64)
+    #     :param power: Transmit power in dBm (0–36)
+    #     :param persist: Whether to save the setting across power cycles
+    #     :return: True if successful, False otherwise
+    #     """
+    #     try:
+    #         if not (1 <= ant <= 64):
+    #             raise ValueError("❌ Antenna number must be 1–64")
+    #         if not (0 <= power <= 36):
+    #             raise ValueError("❌ Power level must be between 0 and 36 dBm")
 
-        self.uart.flush_input()
+    #         print(f"⚙️ Setting Antenna {ant} Power to {power} dBm (persist={persist})")
 
-        # === Build TLV payload ===
-        payload = bytearray()
-        payload += bytes([ant, 1, power])  # [PID][LEN=1][VALUE=power]
-        if persist:
-            payload += bytes([0xFF, 1, 1])  # [PID=0xFF][LEN=1][VALUE=1]
+    #         self.uart.flush_input()
 
-        frame = self.build_frame(mid=0x1001, payload=payload)
-        self.uart.send(frame)
-        time.sleep(0.1)
+    #         # Build TLV: [PID, LEN, VALUE]
+    #         params = bytearray()
+    #         params += bytes([ant, 1, power])  # PID = ant (0x01–0x40)
+    #         if persist:
+    #             params += bytes([0xFF, 1, 1])  # Persistence TLV (save)
+    #         else:
+    #             params += bytes([0xFF, 1, 0])  # Don't save
 
-        raw = self.uart.receive(128)
-        if not raw:
-            print("❌ No response from reader.")
-            return False
+    #         frame = self.build_frame(mid=0x01, payload=params)
+    #         self.uart.send(frame)
 
-        try:
-            parsed = self.parse_frame(raw)
-            print(f"📥 RAW response: {raw.hex()}")
-            mid_actual = parsed["mid"]
-            cat_actual = parsed["category"]
-            data = parsed["data"]
+    #         time.sleep(0.1)
+    #         raw = self.uart.receive(128)
+    #         if not raw:
+    #             raise Exception("❌ No response received from reader.")
 
-            print(f"🔍 MID: {mid_actual:02X}, CAT: {cat_actual:02X}")
-            print(f"🔍 DATA: {data.hex()}")
+    #         frames = self.extract_valid_frames(raw)
+    #         if not frames:
+    #             raise Exception("❌ No valid frames received.")
 
-            if cat_actual != 0x10:
-                print(f"⚠️ Unexpected CAT in response: CAT={cat_actual:02X}")
-                return False
+    #         for idx, f in enumerate(frames):
+    #             parsed = self.parse_frame(f)
+    #             if parsed["mid"] == 0x01 and parsed["category"] == 0x01:
+    #                 data = parsed["data"]
+    #                 if len(data) < 1:
+    #                     raise Exception("❌ No result byte in response.")
+    #                 result = data[0]
+    #                 if result == 0:
+    #                     print("✅ Power configured successfully.")
+    #                     return True
+    #                 elif result == 1:
+    #                     print("⚠️ Error: Unsupported port parameter.")
+    #                 elif result == 2:
+    #                     print("⚠️ Error: Unsupported power value.")
+    #                 elif result == 3:
+    #                     print("⚠️ Error: Failed to save setting.")
+    #                 else:
+    #                     print(f"⚠️ Unknown response code: {result}")
+    #                 return False
 
-            result = self.parse_tlv(data)
-            for pid, val in result.items():
-                print(f"🔧 TLV → PID=0x{pid:02X}, VAL={val.hex()}")
+    #         raise Exception("❌ No matching configuration response found.")
 
-            code = result.get(0x10, b'\xFF')[0]
-            if code == 0:
-                print("✅ Power set successfully.")
-                return True
-            else:
-                print(f"⚠️ Set failed, result code: {code}")
-                return False
-
-        except Exception as e:
-            print(f"❌ Exception during set_power: {e}")
-            return False
+    #     except Exception as e:
+    #         print(f"❌ Error in set_power: {e}")
+    #         return False
 
 
-    def get_power(self, ant: int) -> tuple[bool, int]:
+    def get_power(self, ant: int) -> Optional[int]:
         """
-        Trả về công suất anten `ant` dưới dạng (success: bool, dBm: int).
+        Query the power of a specific antenna (1-64).
         """
         if not (1 <= ant <= 64):
             raise ValueError("Antenna port must be between 1 and 64")
 
-        try:
-            self.uart.flush_input()
+        self.uart.flush_input()
+        frame = self.build_frame(mid=0x02, payload=b'', rs485=self.rs485)
+        self.uart.send(frame)
 
-            frame = self.build_frame(
-                mid=MID.READER_POWER_QUERY,
-                payload=b'',
-                rs485=False,
-                notify=False
-            )
-            self.uart.send(frame)
-            time.sleep(0.1)
-
-            raw = self.uart.receive(128)
-            if not raw:
-                print("❌ No response for get_power.")
-                return False, -1
-
-            parsed = self.parse_frame(raw)
-            expected_pcw = self.build_pcw(0x02, 0x00)
-            if parsed["pcw"] != expected_pcw:
-                print(f"⚠️ Unexpected PCW: got 0x{parsed['pcw']:08X}, expected 0x{expected_pcw:08X}")
-                return False, -1
-            data = parsed["data"]
-            if not data:
-                print("⚠️ Empty data section in response.")
-                return False, -1
-            print(f"🧪 Raw TLV data: {data.hex()}")
-
-            tlvs = self.parse_tlv(data, debug=True)
-            if ant not in tlvs:
-                print(f"⚠️ Antenna {ant} not found in TLV.")
-                return False, -1
-
-            val = tlvs[ant]
-            if len(val) != 1:
-                print(f"⚠️ PID {ant} returned value with invalid length: {len(val)}")
-                return False, -1
-
-            power = val[0]
-            print(f"✅ Antenna {ant} power: {power} dBm")
-            return True, power
-
-        except Exception as e:
-            print(f"❌ Exception in get_power(): {e}")
-            return False, -1
-
-
-    def query_power_range(self) -> dict:
-        """
-        Sends MID=0x1000 – Query RFID Ability.
-        Returns: {'min': int, 'max': int, 'antenna': int}
-        """
-        try:
-            self.uart.flush_input()
-            self.uart.send(self.build_frame((0x10 << 8) | 0x00))  # MID=0x1000
-
-            raw = self.uart.receive(256)
-            if not raw:
-                print("❌ No response"); return {}
-
-            frame = self.parse_frame(raw)
-            print(f"🧩 PCW: 0x{frame['pcw']:08X}")
-
-            if frame['category'] != 0x10 or frame['mid'] != 0x00:
-                print(f"⚠️ Unexpected MID/CAT: MID={frame['mid']:02X}, CAT={frame['category']:02X}")
-                return {}
-
-            data = frame['data']
-            print(f"🧪 Raw data bytes: {[f'{b:02X}' for b in data]}")
-
-            if len(data) >= 3:
-                max_pwr = data[0]
-                min_pwr = data[1]
-                ant_count = data[2]
-                print(f"✅ Power range: {min_pwr}–{max_pwr} dBm, Antenna(s): {ant_count}")
-                return {'min': min_pwr, 'max': max_pwr, 'antenna': ant_count}
-            else:
-                print("⚠️ Insufficient data for power range.")
-                return {}
-
-        except Exception as e:
-            print(f"❌ query_power_range error: {e}")
-            return {}
-
-    def get_power(self) -> Optional[int]:
-        """
-        Queries the reader to get its maximum supported transmit power in dBm.
-        Uses MID=0x0100 (Query Reader's RFID Ability).
-        
-        Returns:
-            int: Maximum transmit power in dBm (0–36)
-            None: If failed or malformed response
-        """
-        try:
-            self.uart.flush_input()
-            cmd_frame = self.build_frame(mid=(0x01 << 8) | 0x00)  
-            self.uart.send(cmd_frame)
-
-            raw = self.uart.receive(256)
-            if not raw:
-                print("❌ No response from reader.")
-                return None
-
-            frame = self.parse_frame(raw)
-            print(f"🧩 PCW: 0x{frame['pcw']:08X}")
-            data = frame['data']
-            print(f"📏 Data Length: {len(data)}")
-            print(f"🧪 Raw bytes: {[f'{b:02X}' for b in data]}")
-
-            if len(data) < 2:
-                print("⚠️ Not enough data to extract max power.")
-                return None
-
-            max_power_dbm = data[1]
-            print(f"✅ Max Transmit Power: {max_power_dbm} dBm")
-
-            if 0 <= max_power_dbm <= 36:
-                return max_power_dbm
-            else:
-                print("⚠️ Max power value outside valid range.")
-                return None
-
-        except Exception as e:
-            print(f"❌ Exception in get_power: {e}")
+        time.sleep(0.1)
+        raw = self.uart.receive(128)
+        if not raw:
+            print("❌ No response for get_power.")
             return None
 
+        frames = self.extract_valid_frames(raw)
+        for frame in frames:
+            pcw = int.from_bytes(frame[1:5], 'big')
+            mid = pcw & 0xFF
+            cat = (pcw >> 8) & 0xFF
+            if mid != 0x02:
+                continue
+
+            # TLV format
+            data_offset = 8 if self.rs485 else 7
+            data = frame[data_offset:-2]
+
+            i = 0
+            while i + 2 <= len(data):
+                pid = data[i]
+                length = data[i + 1]
+                if i + 2 + length > len(data):
+                    break
+                value = data[i + 2: i + 2 + length]
+                if pid == ant:
+                    return value[0]  # power in dBm
+                i += 2 + length
+
+        print(f"⚠️ Antenna {ant} not found in get_power response.")
+        return None
+
+
+    def set_power(self, power: int, ant: int = 1, persist: bool = False):
+        payload = bytearray([
+            ant, 0x01, power  # PID = ant, LEN=1, VALUE
+        ])
+
+        # Optional persist flag – only include if True
+        if persist:
+            payload += bytearray([0xFF, 0x01, 0x01])
+
+        frame = self.build_frame(mid=MID.CONFIGURE_READER_POWER, payload=payload)
+        print(f"➡️ Frame: {frame.hex()}")
+
+        self.uart.send(frame)
+        time.sleep(0.1)
+        raw = self.uart.receive(128)
+        print(f"📥 Full response: {raw.hex()}")
+
+
+        frames = self.extract_valid_frames(raw)
+        for f in frames:
+            parsed = self.parse_frame(f)
+            if parsed["mid"] == 0x01 and parsed["category"] == 0x01:
+                data = parsed["data"]
+                i = 0
+                while i + 2 <= len(data):
+                    pid = data[i]
+                    length = data[i+1]
+                    val = data[i+2]
+                    if pid == 0x03 or pid == 0xFF:  # Error codes
+                        if val == 0:
+                            print("✅ Power configured successfully.")
+                            return True
+                        else:
+                            print(f"❌ Power config failed. Code={val}")
+                            return False
+                    i += 2 + length
+
+        print("❌ No valid power config response found.")
+        return False
 
 
     def parse_tlv(self, data: bytes) -> dict[int, bytes]:
