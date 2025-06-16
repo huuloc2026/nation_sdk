@@ -4,7 +4,7 @@ import time
 def main():
 
     port = "/dev/ttyUSB0"
-    braud = 9600
+    braud = 115200
     reader = NationReader(port, braud)
     reader.open()
 
@@ -21,8 +21,8 @@ def main():
 
         #  # === (1) Query Power Range ===
         print("📡 power_range Info:")
-        power_range = reader.query_power_range()
-        print(power_range)
+        power_range = reader.get_power()
+     
         # if power_range:
         #     min_pwr, max_pwr = power_range
         #     print(f"✅ Supported power range: {min_pwr}–{max_pwr} dBm")
@@ -47,23 +47,23 @@ def main():
 
 
 
-        # # === (3) Set Power for Antenna 1 ===
+        # # # === (3) Set Power for Antenna 1 ===
         # print("\n⚙️ Setting power for Antenna 1 to 28 dBm...")
-        # if reader.set_power(ant=1, power=28, persist=True):
+        # if reader.set_power(ant=1, power=5, persist=True):
         #     print("✅ Power set successfully.")
         # else:
         #     print("❌ Failed to set power.")
 
-        # print("\n🚀 Starting inventory for 10 seconds...")
-        # reader.start_inventory()
+        print("\n🚀 Starting inventory for 10 seconds...")
+        reader.start_inventory()
 
-        # # Let inventory run
-        # time.sleep(5)
+        # Let inventory run
+        time.sleep(5)
 
 
-        # print("🛑 Stopping inventory...")
-        # reader.stop_inventory()
-        # print("✅ Inventory session complete.")
+        print("🛑 Stopping inventory...")
+        reader.stop_inventory()
+        print("✅ Inventory session complete.")
 
     else:
         print("❌ Initialization failed.")

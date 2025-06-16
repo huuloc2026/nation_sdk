@@ -130,10 +130,10 @@ class MID(IntEnum):
     QUERY_BASEBAND = 0x0C00
     # Power Control
     CONFIGURE_READER_POWER = 0x0101
-    QUERY_READER_POWER = 0x0102
+    QUERY_READER_POWER = (0x10 << 8) | 0x00
     SET_READER_POWER_CALIBRATION = 0x0103
     # RFID Capability
-    QUERY_RFID_ABILITY = 0x0500
+    QUERY_RFID_ABILITY = (0x05 << 8) | 0x00
 
 
 class NationReader:
@@ -677,57 +677,82 @@ class NationReader:
 
     def query_power_range(self) -> dict:
         """
-        Queries the reader for supported power range using MID=0x00, CAT=0x05 (Query RFID Ability).
-        Returns:
-            dict: {'min': int, 'max': int, 'step': int} or error message.
+        Sends MID=0x1000 – Query RFID Ability.
+        Returns: {'min': int, 'max': int, 'antenna': int}
         """
         try:
             self.uart.flush_input()
-            frame = self.build_frame(MID.QUERY_RFID_ABILITY, payload=b'')
-            self.uart.send(frame)
+            self.uart.send(self.build_frame((0x10 << 8) | 0x00))  # MID=0x1000
 
             raw = self.uart.receive(256)
-            print(f"📥 RAW: {raw.hex()}")
-            frame_data = self.parse_frame(raw)
-            print(f"🧩 PCW: 0x{frame_data['pcw']:08X}")
-            print(f"📏 Data Length: {len(frame_data['data'])}")
+            if not raw:
+                print("❌ No response"); return {}
 
-            if frame_data['mid'] != 0x00 or frame_data['category'] != 0x05:
-                print(f"⚠️ Unexpected MID/CAT: MID={frame_data['mid']:02X}, CAT={frame_data['category']:02X}")
+            frame = self.parse_frame(raw)
+            print(f"🧩 PCW: 0x{frame['pcw']:08X}")
+
+            if frame['category'] != 0x10 or frame['mid'] != 0x00:
+                print(f"⚠️ Unexpected MID/CAT: MID={frame['mid']:02X}, CAT={frame['category']:02X}")
                 return {}
 
-            data = frame_data['data']
-            i = 0
-            result = {}
+            data = frame['data']
+            print(f"🧪 Raw data bytes: {[f'{b:02X}' for b in data]}")
 
-            while i + 2 <= len(data):
-                pid = data[i]
-                length = data[i + 1]
-                if i + 2 + length > len(data):
-                    print(f"⚠️ Incomplete TLV at byte {i}: PID=0x{pid:02X}, LEN={length}")
-                    break
-                value = data[i + 2:i + 2 + length]
-
-                if pid == 0x01 and length == 1:
-                    result['max'] = value[0]
-                elif pid == 0x02 and length == 1:
-                    result['min'] = value[0]
-                elif pid == 0x03 and length == 1:
-                    result['step'] = value[0]
-                else:
-                    print(f"⚠️ Unknown PID or bad length: PID=0x{pid:02X}, LEN={length}")
-                i += 2 + length
-
-            if 'min' in result and 'max' in result and 'step' in result:
-                print(f"✅ Power range: {result['min']}–{result['max']} dBm, step {result['step']} dB")
-                return result
+            if len(data) >= 3:
+                max_pwr = data[0]
+                min_pwr = data[1]
+                ant_count = data[2]
+                print(f"✅ Power range: {min_pwr}–{max_pwr} dBm, Antenna(s): {ant_count}")
+                return {'min': min_pwr, 'max': max_pwr, 'antenna': ant_count}
             else:
-                print("⚠️ Could not determine full power range.")
-                return result
+                print("⚠️ Insufficient data for power range.")
+                return {}
 
         except Exception as e:
-            print(f"❌ Exception during power range query: {e}")
+            print(f"❌ query_power_range error: {e}")
             return {}
+
+    def get_power(self) -> Optional[int]:
+        """
+        Queries the reader to get its maximum supported transmit power in dBm.
+        Uses MID=0x0100 (Query Reader's RFID Ability).
+        
+        Returns:
+            int: Maximum transmit power in dBm (0–36)
+            None: If failed or malformed response
+        """
+        try:
+            self.uart.flush_input()
+            cmd_frame = self.build_frame(mid=(0x01 << 8) | 0x00)  
+            self.uart.send(cmd_frame)
+
+            raw = self.uart.receive(256)
+            if not raw:
+                print("❌ No response from reader.")
+                return None
+
+            frame = self.parse_frame(raw)
+            print(f"🧩 PCW: 0x{frame['pcw']:08X}")
+            data = frame['data']
+            print(f"📏 Data Length: {len(data)}")
+            print(f"🧪 Raw bytes: {[f'{b:02X}' for b in data]}")
+
+            if len(data) < 2:
+                print("⚠️ Not enough data to extract max power.")
+                return None
+
+            max_power_dbm = data[1]
+            print(f"✅ Max Transmit Power: {max_power_dbm} dBm")
+
+            if 0 <= max_power_dbm <= 36:
+                return max_power_dbm
+            else:
+                print("⚠️ Max power value outside valid range.")
+                return None
+
+        except Exception as e:
+            print(f"❌ Exception in get_power: {e}")
+            return None
 
 
 
