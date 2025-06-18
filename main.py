@@ -4,7 +4,7 @@ import time
 def main():
 
     port = "/dev/ttyUSB0"
-    braud = 9600
+    braud = 115200
     reader = NationReader(port, braud)
     reader.open()
 
@@ -14,18 +14,15 @@ def main():
         print("📡 Reader Info:")
         for k, v in info.items():
             print(f"  {k}: {v}")
-        # ability = reader.query_rfid_ability()
-        # if ability:
-        #     print(f"🔋 Power Range: {ability['min_power_dbm']} ~ {ability['max_power_dbm']} dBm")
-        #     print(f"📶 Antennas: {ability['antenna_count']}")
-        #     print(f"📡 Frequencies: {ability['frequencies']}")
-        #     print(f"📚 Protocols: {ability['rfid_protocols']}")
-        # else:
-        #     print("⚠️ No RFID ability returned.")
-        # for ant in range(1, 16):
-        #     power = reader.get_power(ant)
-        #     if power is not None:
-        #         print(f"Antenna {ant} Power: {power} dBm")
+        print("\n🔍 Querying antenna power levels...")
+        powers = reader.query_reader_power()
+        for ant in range(1, 5):
+            val = powers.get(ant)
+            if val is not None:
+                print(f"  🔧 Antenna {ant}: {val} dBm")
+            else:
+                print(f"  ⚠️ Antenna {ant}: N/A")
+
 
         # reader.set_power(power=32,persist=False)
     # # # === POWER QUERY ===

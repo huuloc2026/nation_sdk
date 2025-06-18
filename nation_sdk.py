@@ -129,8 +129,8 @@ class MID(IntEnum):
     CONFIG_BASEBAND = 0x0B00
     QUERY_BASEBAND = 0x0C00
     # Power Control
-    CONFIGURE_READER_POWER = 0x0101
-    QUERY_READER_POWER = 0x1002
+    CONFIGURE_READER_POWER = 0x0201
+    QUERY_READER_POWER = 0x0202
     SET_READER_POWER_CALIBRATION = 0x0103
     # RFID Capability
     QUERY_RFID_ABILITY = (0x05 << 8) | 0x00
@@ -555,7 +555,6 @@ class NationReader:
         except Exception as e:
             return {"error": f"Parse error: {e}"}
 
-
     def start_inventory(self):
         self._inventory_running = True
         payload = self.build_epc_read_payload()
@@ -587,7 +586,6 @@ class NationReader:
 
         self._inventory_thread = threading.Thread(target=receive_loop, daemon=True)
         self._inventory_thread.start()
-
 
     def stop_inventory(self):
         print("🛑 Gửi lệnh STOP (MID=0xFF)...")
@@ -632,190 +630,132 @@ class NationReader:
         print("❌ Không nhận được phản hồi STOP hoặc END sau 10 lần thử")
         return False
 
-
     #NEED TODO:
-
-    # def set_power(self, ant: int, power: int, persist: bool = True) -> bool:
-    #     """
-    #     Configures the transmit power for a specific antenna port.
-    #     :param ant: Antenna number (1–64)
-    #     :param power: Transmit power in dBm (0–36)
-    #     :param persist: Whether to save the setting across power cycles
-    #     :return: True if successful, False otherwise
-    #     """
-    #     try:
-    #         if not (1 <= ant <= 64):
-    #             raise ValueError("❌ Antenna number must be 1–64")
-    #         if not (0 <= power <= 36):
-    #             raise ValueError("❌ Power level must be between 0 and 36 dBm")
-
-    #         print(f"⚙️ Setting Antenna {ant} Power to {power} dBm (persist={persist})")
-
-    #         self.uart.flush_input()
-
-    #         # Build TLV: [PID, LEN, VALUE]
-    #         params = bytearray()
-    #         params += bytes([ant, 1, power])  # PID = ant (0x01–0x40)
-    #         if persist:
-    #             params += bytes([0xFF, 1, 1])  # Persistence TLV (save)
-    #         else:
-    #             params += bytes([0xFF, 1, 0])  # Don't save
-
-    #         frame = self.build_frame(mid=0x01, payload=params)
-    #         self.uart.send(frame)
-
-    #         time.sleep(0.1)
-    #         raw = self.uart.receive(128)
-    #         if not raw:
-    #             raise Exception("❌ No response received from reader.")
-
-    #         frames = self.extract_valid_frames(raw)
-    #         if not frames:
-    #             raise Exception("❌ No valid frames received.")
-
-    #         for idx, f in enumerate(frames):
-    #             parsed = self.parse_frame(f)
-    #             if parsed["mid"] == 0x01 and parsed["category"] == 0x01:
-    #                 data = parsed["data"]
-    #                 if len(data) < 1:
-    #                     raise Exception("❌ No result byte in response.")
-    #                 result = data[0]
-    #                 if result == 0:
-    #                     print("✅ Power configured successfully.")
-    #                     return True
-    #                 elif result == 1:
-    #                     print("⚠️ Error: Unsupported port parameter.")
-    #                 elif result == 2:
-    #                     print("⚠️ Error: Unsupported power value.")
-    #                 elif result == 3:
-    #                     print("⚠️ Error: Failed to save setting.")
-    #                 else:
-    #                     print(f"⚠️ Unknown response code: {result}")
-    #                 return False
-
-    #         raise Exception("❌ No matching configuration response found.")
-
-    #     except Exception as e:
-    #         print(f"❌ Error in set_power: {e}")
-    #         return False
-
-
-    def get_power(self, ant: int) -> Optional[int]:
+    def configure_reader_power(self, antenna_powers: dict[int, int], persistence: Optional[bool] = None) -> bool:
         """
-        Query the power of a specific antenna (1-64).
+        Configures the transmit power for specified antenna ports.
+
+        :param antenna_powers: A dictionary where keys are antenna IDs (1-64)
+                               and values are power levels in dBm (0-36).
+        :param persistence: If True, settings are saved after power-down.
+                            If False, settings are temporary. If None, uses reader default (typically save).
+        :return: True if configuration was successful, False otherwise.
         """
-        if not (1 <= ant <= 64):
-            raise ValueError("Antenna port must be between 1 and 64")
+        if not antenna_powers:
+            print("❌ No antenna powers provided for configuration.")
+            return False
 
-        self.uart.flush_input()
-        frame = self.build_frame(mid=0x02, payload=b'', rs485=self.rs485)
-        self.uart.send(frame)
+        payload_parts = []
+        for ant_id, power_dbm in antenna_powers.items():
+            if not (1 <= ant_id <= 64):
+                print(f"❌ Invalid antenna ID: {ant_id}. Must be between 1 and 64.")
+                return False
+            if not (0 <= power_dbm <= 36): # Max power is 36dBm [18]
+                print(f"❌ Invalid power level for antenna {ant_id}: {power_dbm}dBm. Must be between 0 and 36dBm.")
+                return False
+            payload_parts.append(ant_id.to_bytes(1, 'big')) # PID for antenna [17]
+            payload_parts.append(power_dbm.to_bytes(1, 'big')) # Value for power [17]
 
-        time.sleep(0.1)
-        raw = self.uart.receive(128)
-        if not raw:
-            print("❌ No response for get_power.")
-            return None
+        if persistence is not None:
+            payload_parts.append(b'\xFF') # PID for Parameter persistence [17]
+            payload_parts.append((0x01 if persistence else 0x00).to_bytes(1, 'big')) # Value for persistence [17]
 
-        frames = self.extract_valid_frames(raw)
-        for frame in frames:
-            pcw = int.from_bytes(frame[1:5], 'big')
-            mid = pcw & 0xFF
-            cat = (pcw >> 8) & 0xFF
-            if mid != 0x02:
-                continue
+        full_payload = b''.join(payload_parts)
 
-            # TLV format
-            data_offset = 8 if self.rs485 else 7
-            data = frame[data_offset:-2]
+        try:
+            self.uart.flush_input()
+            print(f"🚀 Sending Configure Reader Power command with payload: {full_payload.hex()}")
+            command_frame = self.build_frame(MID.CONFIGURE_READER_POWER, payload=full_payload, rs485=self.rs485)
+            self.uart.send(command_frame)
 
-            i = 0
-            while i + 2 <= len(data):
-                pid = data[i]
-                length = data[i + 1]
-                if i + 2 + length > len(data):
-                    break
-                value = data[i + 2: i + 2 + length]
-                if pid == ant:
-                    return value[0]  # power in dBm
-                i += 2 + length
+            time.sleep(0.1) # Give reader time to respond
+            raw = self.uart.receive(64)
 
-        print(f"⚠️ Antenna {ant} not found in get_power response.")
-        return None
+            if not raw:
+                print("❌ No response received from reader.")
+                return False
 
+            frame = self.parse_frame(raw)
+            if not frame:
+                print("❌ Failed to parse response frame.")
+                return False
 
-    def set_power(self, power: int, ant: int = 1, persist: bool = False):
-        payload = bytearray([
-            ant, 0x01, power  # PID = ant, LEN=1, VALUE
-        ])
+            mid = frame["mid"]
+            data = frame["data"]
 
-        # Optional persist flag – only include if True
-        if persist:
-            payload += bytearray([0xFF, 0x01, 0x01])
+            print(f"🔍 Response MID: 0x{mid:02X}, Data: {data.hex()}")
 
-        frame = self.build_frame(mid=MID.CONFIGURE_READER_POWER, payload=payload)
-        print(f"➡️ Frame: {frame.hex()}")
+            # Expected response MID is 0x01 (from CONFIGURE_READER_POWER) [5]
+            # Data should contain configuration result (0x00 for success) [19]
+            if mid == (MID.CONFIGURE_READER_POWER & 0xFF) and len(data) >= 1 and data == 0x00:
+                print("✅ Reader power configured successfully.")
+                return True
+            else:
+                result_code = data if len(data) >= 1 else -1
+                error_map = {
+                    0x01: "the reader hardware does not support the port parameter", # [19]
+                    0x02: "The reader does not support the power parameter",       # [19]
+                    0x03: "Save failed"                                          # [19]
+                }
+                error_msg = error_map.get(result_code, "unknown error")
+                print(f"❌ Failed to configure reader power. Result code: 0x{result_code:02X} ({error_msg})")
+                return False
 
-        self.uart.send(frame)
-        time.sleep(0.1)
-        raw = self.uart.receive(128)
-        print(f"📥 Full response: {raw.hex()}")
+        except Exception as e:
+            print(f"❌ Exception during power configuration: {e}")
+            return False
 
+    def query_reader_power(self) -> dict[int, int]:
+        """
+        Queries the current transmit power settings for all antenna ports.
 
-        frames = self.extract_valid_frames(raw)
-        for f in frames:
-            parsed = self.parse_frame(f)
-            if parsed["mid"] == 0x01 and parsed["category"] == 0x01:
-                data = parsed["data"]
-                i = 0
-                while i + 2 <= len(data):
-                    pid = data[i]
-                    length = data[i+1]
-                    val = data[i+2]
-                    if pid == 0x03 or pid == 0xFF:  # Error codes
-                        if val == 0:
-                            print("✅ Power configured successfully.")
-                            return True
-                        else:
-                            print(f"❌ Power config failed. Code={val}")
-                            return False
-                    i += 2 + length
+        :return: A dictionary where keys are antenna IDs (1-64)
+                 and values are power levels in dBm, or an empty dict on failure.
+        """
+        try:
+            self.uart.flush_input()
+            print("🚀 Sending Query Reader Power command...")
+            # Use the consistent MID value for querying RFID powers
+            command_frame = self.build_frame(MID.QUERY_READER_POWER, payload=b'', rs485=self.rs485)
+            self.uart.send(command_frame)
 
-        print("❌ No valid power config response found.")
-        return False
+            time.sleep(0.1) # Give reader time to respond
+            raw = self.uart.receive(128) # Receive enough bytes for multiple antenna responses
 
+            if not raw:
+                print("❌ No response received from reader.")
+                return {}
 
-    def parse_tlv(self, data: bytes) -> dict[int, bytes]:
-        result = {}
-        i = 0
-        while i + 2 <= len(data):
-            pid = data[i]
-            length = data[i+1]
+            frame = self.parse_frame(raw)
+            if not frame:
+                print("❌ Failed to parse response frame.")
+                return {}
 
-            if i + 2 + length > len(data):
-                print(f"⚠️ Incomplete TLV at byte {i}: PID=0x{pid:02X}, LEN={length}")
-                break
+            mid = frame["mid"]
+            data = frame["data"]
 
-            value = data[i+2:i+2+length]
-            result[pid] = value
-            i += 2 + length
+            print(f"🔍 Response MID: 0x{mid:02X}, Data: {data.hex()}")
 
-        return result
+            # Expected response MID is 0x02 (from QUERY_READER_POWER) [19]
+            if mid == (MID.QUERY_READER_POWER & 0xFF):
+                power_settings = {}
+                offset = 0
+                while offset + 2 <= len(data): # Each power entry is 2 bytes (PID + Value)
+                    ant_id = data[offset] # PID is antenna ID [19]
+                    power_dbm = data[offset + 1] # Value is power in dBm [19]
+                    power_settings[ant_id] = power_dbm
+                    offset += 2
+                print(f"✅ Reader power settings queried: {power_settings}")
+                return power_settings
+            else:
+                print("❌ Unexpected response MID for power query.")
+                return {}
 
+        except Exception as e:
+            print(f"❌ Exception during power query: {e}")
+            return {}
+             
 
-    def parse_result_code(data: bytes, expected_pid: int) -> int:
-        result = self.parse_tlv(data)
-        return result.get(expected_pid, b'\xFF')[0]
-        
-    def set_beeper(self, mode: int) -> bool:
-        return self.send_command(0x60, bytes([mode])) is not None
-
-    def get_beeper(self) -> Optional[int]:
-        resp = self.send_command(0x61)
-        if resp and len(resp) >= 1:
-            return resp[0]
-        return None
- 
     
 
     
