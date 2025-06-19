@@ -119,11 +119,11 @@ class MID(IntEnum):
     CONFIRM_CONNECTION = 0x12
     # RFID Inventory
     READ_EPC_TAG = (0x02 << 8) | 0x10
-    EPC_UPLOAD = 0x0000    # Notification from reader
-    READ_END = 0x0001      # Notification of end
-
+    #STOP
     STOP_INVENTORY = (0x02 << 8) | 0xFF
-    STOP_OPERATION = 0x0101
+    STOP_OPERATION = 0xFF
+    READ_END = 0x1231
+
 
     # RFID Baseband
     CONFIG_BASEBAND = 0x0B00
@@ -158,6 +158,7 @@ class NationReader:
         self.uart.open()
 
     def close(self):
+        self.uart.flush_input()
         self.uart.close()
 
     def send(self, data: bytes):
@@ -167,9 +168,6 @@ class NationReader:
         return self.uart.receive(size)
 
   
-
-
-
     @staticmethod
     def crc16_ccitt(data: bytes) -> int:
         crc = 0x0000
@@ -182,19 +180,6 @@ class NationReader:
                     crc = (crc << 1) & 0xFFFF
         return crc
 
-
-    @staticmethod
-    def crc16_bytes(data: bytes) -> bytes:
-        """
-        Return 2-byte CRC in big-endian order.
-        :param data: Input data for CRC computation
-        :return: CRC16 result as two-byte big-endian
-        """
-        crc = crc16_ccitt(data)
-        return crc.to_bytes(2, 'big')  # Big-endian per protocol
-
-
-    
 
     @classmethod
     def build_frame(cls, mid, payload: bytes = b"", rs485: bool = False, notify: bool = False) -> bytes:
@@ -435,16 +420,6 @@ class NationReader:
             print(f"❌ Error in query_rfid_ability: {e}")
             return {}
 
-    def calc_crc_ccitt(data: bytes, poly=0x1021, init=0x0000) -> int:
-        crc = init
-        for byte in data:
-            crc ^= (byte << 8)
-            for _ in range(8):
-                if crc & 0x8000:
-                    crc = ((crc << 1) ^ poly) & 0xFFFF
-                else:
-                    crc = (crc << 1) & 0xFFFF
-        return crc
 
     def Query_Reader_Information(self) -> dict:
         """
@@ -463,10 +438,6 @@ class NationReader:
                 return {}
 
             frame_data = self.parse_frame(raw)
-
-            # print(f"📥 RAW: {raw.hex()}")
-            # print(f"🧩 Frame Data: {frame_data}")
-
 
             if frame_data['mid'] != 0x00 or frame_data['category'] != 0x01:
                 print("❌ Unexpected MID or Category.")
@@ -535,6 +506,8 @@ class NationReader:
         payload += b'\x01' if continuous else b'\x00'
         return payload
 
+    
+    #✅
     def parse_epc(self, data: bytes) -> dict:
         try:
             epc_len = int.from_bytes(data[0:2], 'big')
@@ -555,156 +528,7 @@ class NationReader:
         except Exception as e:
             return {"error": f"Parse error: {e}"}
 
-    def start_inventory(self):
-        self._inventory_running = True
-        payload = self.build_epc_read_payload()
-        frame = self.build_frame(mid=MID.READ_EPC_TAG, payload=payload)
-        self.send(frame)
-        print("🚀 Inventory started")
-
-        def receive_loop():
-            while self._inventory_running:
-                try:
-                    raw = self.receive(64)
-                    if not raw:
-                        continue
-                    frame = self.parse_frame(raw)
-
-                    if frame['mid'] == 0x00:
-                        tag = self.parse_epc(frame['data'])
-                        if "error" in tag:
-                            print(f"⚠️ Parse error: {tag['error']}")
-                        else:
-                            print(f"📦 Tag EPC: {tag['epc']}, RSSI: {tag['rssi']}, Ant: {tag['antenna_id']}")
-                    elif frame['mid'] == 0x01:
-                        reason = frame['data'][0] if frame['data'] else None
-                        print(f"✅ Inventory ended. Reason: {reason}")
-                        break
-                except Exception as e:
-                    # print(f"⚠️ Error during receive: {e}")
-                    continue
-
-        self._inventory_thread = threading.Thread(target=receive_loop, daemon=True)
-        self._inventory_thread.start()
-
-    def stop_inventory(self):
-        print("🛑 Gửi lệnh STOP (MID=0xFF)...")
-
-        self.uart.flush_input()
-        stop_frame = self.build_frame(mid=MID.STOP_OPERATION, payload=b'')
-        print(f"➡️ STOP Frame: {stop_frame.hex()}")
-        self.send(stop_frame)
-
-        for attempt in range(10):
-            time.sleep(0.2)
-            raw = self.receive(256)
-            frames = self.extract_valid_frames(raw)
-            print(f"📥 [{attempt+1}] Nhận {len(raw)} byte, {len(frames)} frame hợp lệ")
-
-            for idx, f in enumerate(frames):
-                try:
-                    resp = self.parse_frame(f)
-                    mid = resp["mid"]
-                    data = resp["data"]
-
-                    if mid == MID.STOP_OPERATION:
-                        code = data[0] if data else -1
-                        if code == 0x00:
-                            print("✅ STOP thành công – Reader ở trạng thái IDLE")
-                            return True
-                        else:
-                            print(f"⚠️ STOP lỗi với mã: {code:#02x}")
-                            return False
-
-                    elif mid == MID.READ_END:
-                        reason = data[0] if data else -1
-                        print(f"✅ Inventory ended. Reason: {reason}")
-                        return True  # <== Đây là điểm thay đổi
-
-                    else:
-                        print(f"↪️ Bỏ qua MID={mid:#02x}")
-
-                except Exception as e:
-                    print(f"❌ Lỗi phân tích frame {idx}: {e}")
-
-        print("❌ Không nhận được phản hồi STOP hoặc END sau 10 lần thử")
-        return False
-
-    #NEED TODO:
-    def configure_reader_power(self, antenna_powers: dict[int, int], persistence: Optional[bool] = None) -> bool:
-        """
-        Configures the transmit power for specified antenna ports.
-
-        :param antenna_powers: A dictionary where keys are antenna IDs (1-64)
-                               and values are power levels in dBm (0-36).
-        :param persistence: If True, settings are saved after power-down.
-                            If False, settings are temporary. If None, uses reader default (typically save).
-        :return: True if configuration was successful, False otherwise.
-        """
-        if not antenna_powers:
-            print("❌ No antenna powers provided for configuration.")
-            return False
-
-        payload_parts = []
-        for ant_id, power_dbm in antenna_powers.items():
-            if not (1 <= ant_id <= 64):
-                print(f"❌ Invalid antenna ID: {ant_id}. Must be between 1 and 64.")
-                return False
-            if not (0 <= power_dbm <= 36): # Max power is 36dBm [18]
-                print(f"❌ Invalid power level for antenna {ant_id}: {power_dbm}dBm. Must be between 0 and 36dBm.")
-                return False
-            payload_parts.append(ant_id.to_bytes(1, 'big')) # PID for antenna [17]
-            payload_parts.append(power_dbm.to_bytes(1, 'big')) # Value for power [17]
-
-        if persistence is not None:
-            payload_parts.append(b'\xFF') # PID for Parameter persistence [17]
-            payload_parts.append((0x01 if persistence else 0x00).to_bytes(1, 'big')) # Value for persistence [17]
-
-        full_payload = b''.join(payload_parts)
-
-        try:
-            self.uart.flush_input()
-            print(f"🚀 Sending Configure Reader Power command with payload: {full_payload.hex()}")
-            command_frame = self.build_frame(MID.CONFIGURE_READER_POWER, payload=full_payload, rs485=self.rs485)
-            self.uart.send(command_frame)
-
-            time.sleep(0.1) # Give reader time to respond
-            raw = self.uart.receive(64)
-
-            if not raw:
-                print("❌ No response received from reader.")
-                return False
-
-            frame = self.parse_frame(raw)
-            if not frame:
-                print("❌ Failed to parse response frame.")
-                return False
-
-            mid = frame["mid"]
-            data = frame["data"]
-
-            print(f"🔍 Response MID: 0x{mid:02X}, Data: {data.hex()}")
-
-            # Expected response MID is 0x01 (from CONFIGURE_READER_POWER) [5]
-            # Data should contain configuration result (0x00 for success) [19]
-            if mid == (MID.CONFIGURE_READER_POWER & 0xFF) and len(data) >= 1 and data == 0x00:
-                print("✅ Reader power configured successfully.")
-                return True
-            else:
-                result_code = data if len(data) >= 1 else -1
-                error_map = {
-                    0x01: "the reader hardware does not support the port parameter", # [19]
-                    0x02: "The reader does not support the power parameter",       # [19]
-                    0x03: "Save failed"                                          # [19]
-                }
-                error_msg = error_map.get(result_code, "unknown error")
-                print(f"❌ Failed to configure reader power. Result code: 0x{result_code:02X} ({error_msg})")
-                return False
-
-        except Exception as e:
-            print(f"❌ Exception during power configuration: {e}")
-            return False
-
+    #✅
     def query_reader_power(self) -> dict[int, int]:
         """
         Queries the current transmit power settings for all antenna ports.
@@ -754,8 +578,263 @@ class NationReader:
         except Exception as e:
             print(f"❌ Exception during power query: {e}")
             return {}
-             
 
     
+    def configure_reader_power(self, antenna_powers: dict[int, int], persistence: Optional[bool] = None) -> bool:
+        """
+        Configures the transmit power for specified antenna ports.
+        :param antenna_powers: A dictionary where keys are antenna IDs (1-64)
+                               and values are power levels in dBm (0-36).
+        :param persistence: If True, settings are saved after power-down.
+                            If False, settings are temporary. If None, uses reader default (typically save).
+        :return: True if configuration was successful, False otherwise.
+        """
+        if not antenna_powers:
+            print("❌ No antenna powers provided for configuration.")
+            return False
+ 
+        payload_parts = []
+        for ant_id, power_dbm in antenna_powers.items():
+            if not (1 <= ant_id <= 64):
+                print(f"❌ Invalid antenna ID: {ant_id}. Must be between 1 and 64.")
+                return False
+            if not (0 <= power_dbm <= 36): # Max power is 36dBm [18]
+                print(f"❌ Invalid power level for antenna {ant_id}: {power_dbm}dBm. Must be between 0 and 36dBm.")
+                return False
+            payload_parts.append(ant_id.to_bytes(1, 'big')) # PID for antenna [17]
+            payload_parts.append(power_dbm.to_bytes(1, 'big')) # Value for power [17]
+ 
+        if persistence is not None:
+            payload_parts.append(b'\xFF') # PID for Parameter persistence [17]
+            payload_parts.append((0x01 if persistence else 0x00).to_bytes(1, 'big')) # Value for persistence [17]
+ 
+        full_payload = b''.join(payload_parts)
+ 
+        try:
+            self.uart.flush_input()
+            print(f"🚀 Sending Configure Reader Power command with payload: {full_payload.hex()}")
+            command_frame = self.build_frame(MID.CONFIGURE_READER_POWER, payload=full_payload, rs485=self.rs485)
+            self.uart.send(command_frame)
+ 
+            time.sleep(0.1) # Give reader time to respond
+            raw = self.uart.receive(64)
+ 
+            if not raw:
+                print("❌ No response received from reader.")
+                return False
+ 
+            frame = self.parse_frame(raw)
+            if not frame:
+                print("❌ Failed to parse response frame.")
+                return False
+ 
+            mid = frame["mid"]
+            data = frame["data"]
+ 
+            print(f"🔍 Response MID: 0x{mid:02X}, Data: {data.hex()}")
+ 
+            # Expected response MID is 0x01 (from CONFIGURE_READER_POWER) [5]
+            # Data should contain configuration result (0x00 for success) [19]
+            if mid == (MID.CONFIGURE_READER_POWER & 0xFF) and len(data) >= 1 and data == 0x00:
+                print("✅ Reader power configured successfully.")
+                return True
+            else:
+                result_code = data if len(data) >= 1 else -1
+                error_map = {
+                    0x01: "the reader hardware does not support the port parameter", # [19]
+                    0x02: "The reader does not support the power parameter",       # [19]
+                    0x03: "Save failed"                                          # [19]
+                }
+                error_msg = error_map.get(result_code, "unknown error")
+                print(f"❌ Failed to configure reader power. Result code: 0x{result_code:02X} ({error_msg})")
+                return False
+ 
+        except Exception as e:
+            print(f"❌ Exception during power configuration: {e}")
+            return False
+ 
+    #19/06/2025
+    ################################################################################
+    #                            INVENTORY HEADER                                  #
+    ################################################################################
+    def is_inventory_running(self):
+        return self._inventory_running
 
+    def start_inventory(self, on_tag=None, on_inventory_end=None):
+        """
+        Bắt đầu inventory. Gán callback nếu cần:
+        - on_tag(tag: dict)
+        - on_inventory_end(reason: int)
+        """
+        self._inventory_running = True
+        self._on_tag = on_tag
+        self._on_inventory_end = on_inventory_end
+
+        payload = self.build_epc_read_payload()
+        frame = self.build_frame(mid=MID.READ_EPC_TAG, payload=payload)
+        self.send(frame)
+        print("🚀 Inventory started")
+
+        self._inventory_thread = threading.Thread(target=self._receive_inventory_loop)
+        self._inventory_thread.start()
+
+    def _receive_inventory_loop(self):
+        while self._inventory_running:
+            try:
+                raw = self.receive(64)
+                if not raw:
+                    continue
+
+                frame = self.parse_frame(raw)
+                mid = frame["mid"]
+
+                if mid == 0x00:  # EPC tag
+                    tag = self.parse_epc(frame['data'])
+                    if "error" in tag:
+                        print(f"⚠️ Parse error: {tag['error']}")
+                    else:
+                        # print(f"📦 Tag EPC: {tag['epc']}, RSSI: {tag['rssi']}, Ant: {tag['antenna_id']}")
+                        if self._on_tag:
+                            self._on_tag(tag)
+
+                elif mid in MID.all_read_end_mids():  # MID=0x01/0x21/0x31
+                    reason = frame['data'][0] if frame['data'] else None
+                    print(f"✅ Inventory ended. Reason: {reason}")
+                    if self._on_inventory_end:
+                        self._on_inventory_end(reason)
+                    self._inventory_running = False
+                    break
+
+            except Exception as e:
+                # print(f"⚠️ Error in inventory loop: {e}")
+                continue
+
+
+    def stop_inventory(self) -> bool:
+        """
+        Sends the Stop command (MID=0xFF) to halt RFID operations and confirm idle state.
+        Returns True if the reader acknowledges stop or issues a valid 'read end' notification.
+        """
+        
+        
+        # Step 1: Stop any running inventory thread if needed
+        self._inventory_running = False
+        if hasattr(self, '_inventory_thread') and self._inventory_thread and self._inventory_thread.is_alive():
+            self._inventory_thread.join(timeout=1)
+            print("🧵 Inventory thread stopped.")
+
+        # Step 2: Clear any unread UART data
+        try:
+            self.uart.flush_input()
+        except Exception as e:
+            print(f"⚠️ UART flush failed: {e}")
+
+        # Step 3: Send STOP command frame
+        stop_frame = self.build_frame(mid=MID.STOP_INVENTORY, payload=b'')
+        self.send(stop_frame)
+
+        # Step 4: Wait for confirmation via response or notification
+        for attempt in range(10):
+            time.sleep(0.2)
+            try:
+                raw = self.receive(256)
+                frames = self.extract_valid_frames(raw)
+                
+
+                for idx, f in enumerate(frames):
+                    try:
+                        resp = self.parse_frame(f)
+                        mid = resp["mid"]
+                        data = resp["data"]
+
+                        if mid == MID.STOP_OPERATION:  # MID=0xFF, response
+                            result = data[0] if data else -1
+                            if result == 0x00:
+                                print("✅ Reader responded: STOP successful, now IDLE.")
+                                return True
+                            else:
+                                print(f"⚠️ Reader responded: STOP error code {result:#02x}")
+                                return False
+
+                        elif mid in MID.all_read_end_mids():
+                            reason = data[0] if data else -1
+                            if reason == 1:
+                                print("✅ Read end notification: stopped by STOP command.")
+                                return True
+                            else:
+                                print(f"↪️ Read ended with reason code {reason}, not STOP command.")
+
+                        else:
+                            print(f"🔍 Unrelated frame, MID={mid:#04x}")
+                    except Exception as e:
+                        print(f"❌ Frame parse error [{idx}]: {e}")
+            except Exception as e:
+                print(f"⚠️ UART receive error on attempt {attempt+1}: {e}")
+
+        print("❌ STOP failed: no valid response or reading end notification after 10 attempts.")
+        return False
+
+    ################################################################################
+    #                            ANT HEADER                                        #
+    ################################################################################
+    def send_ant_config(self, ant_mask: int) -> bool:
+        """
+        Gửi cấu hình MID=0x07 để bật/tắt antenna hub.
+        """
+        payload = ant_mask.to_bytes(2, byteorder="little")
+        frame = self.build_frame(mid=0x07, payload=payload)
+        self.send(frame)
+        resp = self.receive(64)
+        parsed = self.parse_frame(resp)
+        result = parsed["data"][0]
+        if result == 0x00:
+            print(f"✅ Antenna configuration success. Mask=0x{ant_mask:04X}")
+            return True
+        else:
+            print(f"❌ Antenna config failed. Result=0x{result:02X}")
+            return False
+
+    def query_enabled_ant_mask(self) -> int:
+        """
+        Trả về bitmask các antenna đang bật, từ biến nội bộ hoặc mặc định.
+        Nếu chưa được set bằng enable/disable_ant(), thì mặc định là antenna 1 bật.
+        """
+        return getattr(self, '_enabled_ant_mask', 0x0001)
+
+
+    def switch_ant(self, ant: int) -> bool:
+        """
+        Switch to a specific antenna for the next read operation.
+        Only affects the next command (e.g., read EPC).
+        """
+        if not (1 <= ant <= 32):
+            raise ValueError("Antenna must be 1–32")
+        
+        ant_mask = 1 << (ant - 1)
+        self._last_switch_ant_mask = ant_mask  # Store internally for next read
+        print(f"📡 Switched to antenna {ant} (bitmask=0x{ant_mask:08X})")
+        return True
+
+
+    def enable_ant(self, ant: int) -> bool:
+        """
+        Enable an extended hub antenna (1–16) via MID=0x07.
+        Only works in idle state.
+        """
+        current_mask = self.query_enabled_ant_mask()  # Optional: if you track current state
+        updated_mask = current_mask | (1 << (ant - 1))
+        return self.send_ant_config(updated_mask)
+
+
+    def disable_ant(self, ant: int) -> bool:
+        """
+        Disable an extended hub antenna (1–16) via MID=0x07.
+        Only works in idle state.
+        """
+        current_mask = self.query_enabled_ant_mask()
+        updated_mask = current_mask & ~(1 << (ant - 1))
+        return self.send_ant_config(updated_mask)
     
+    def get_enabled_ants(self) -> list[int]:
+        mask = self.query_enabled_ant_mask()
+        return [i+1 for i in range(16) if (mask >> i) & 1]
