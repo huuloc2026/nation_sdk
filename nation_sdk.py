@@ -537,10 +537,10 @@ class NationReader:
                  and values are power levels in dBm, or an empty dict on failure.
         """
         try:
-            self.uart.flush_input()
             print("🚀 Sending Query Reader Power command...")
             # Use the consistent MID value for querying RFID powers
             command_frame = self.build_frame(MID.QUERY_READER_POWER, payload=b'', rs485=self.rs485)
+            self.uart.flush_input()
             self.uart.send(command_frame)
 
             time.sleep(0.1) # Give reader time to respond
@@ -716,7 +716,6 @@ class NationReader:
         Returns True if the reader acknowledges stop or issues a valid 'read end' notification.
         """
         
-        
         # Step 1: Stop any running inventory thread if needed
         self._inventory_running = False
         if hasattr(self, '_inventory_thread') and self._inventory_thread and self._inventory_thread.is_alive():
@@ -777,6 +776,7 @@ class NationReader:
     ################################################################################
     #                            ANT HEADER                                        #
     ################################################################################
+    
     def send_ant_config(self, ant_mask: int) -> bool:
         """
         Gửi cấu hình MID=0x07 để bật/tắt antenna hub.

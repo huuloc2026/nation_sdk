@@ -60,7 +60,9 @@ def main():
     #     else:
     #         print(f"  ⚠️ Antenna {ant}: N/A")
 
-    
+    reader.configure_reader_power({1: 30, 2: 25}, persistence=True)
+    actual = reader.query_power(1)
+    print(f"🧪 Đã set: 30dBm – Reader báo lại: {actual}dBm")
     reader.start_inventory(on_tag=on_tag_callback, on_inventory_end=on_end_callback)
     time.sleep(10)
     
