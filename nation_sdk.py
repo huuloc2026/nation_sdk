@@ -1029,7 +1029,7 @@ class NationReader:
             data = parsed["data"]
 
             if parsed["mid"] != 0x03:
-                print(f"❌ Unexpected MID in response: 0x{parsed['mid']:02X}")
+                # print(f"❌ Unexpected MID in response: 0x{parsed['mid']:02X}")
                 return False
 
             if len(data) < 1 or data[0] != 0x00:
@@ -1125,49 +1125,66 @@ class NationReader:
     #                            BEEPER HEADER                                     #
     ################################################################################
     
-    def set_beeper(self) -> bool:
-        """
-        Configures the RFID reader's buzzer functionality to be controlled by the upper computer.
-        Sends MID=0x1E with the correct category (0x01) and payload=0x01 to enable upper computer control.
+    # def get_beeper(self) -> bool:
+    #     """
+    #     Configures the RFID reader's buzzer functionality to be controlled by the upper computer.
+    #     Sends MID=0x1E with the correct category (0x01) and payload=0x01 to enable upper computer control.
         
-        :return: True if the setup succeeded, False otherwise.
+    #     :return: True if the setup succeeded, False otherwise.
+    #     """
+    #     try:
+            
+    #         # Use the corrected MID with the proper category
+    #         mid = MID.BUZZER_SWITCH
+    #         self.uart.flush_input()  # Clear any previous data in the UART buffer
+    #         # Build the payload for the buzzer control command
+    #         payload = bytes([0x01])  # 0x01 indicates "upper computer control"
+            
+
+    #         # Build the communication frame
+    #         frame = self.build_frame(mid, payload, rs485=False)
+            
+    #         self.send(frame)
+
+    #         # Receive and parse the response
+    #         raw_response = self.receive(64)
+    #         response = self.parse_frame(raw_response)
+
+    #         # Check the response MID and result
+    #         if response["mid"] == (mid & 0xFF):  # Compare only the MID part
+    #             result = response["data"][0] if len(response["data"]) > 0 else -1
+    #             if result == 0x00:
+    #                 self.buzzer_control_enabled = True
+    #                 # print("✅ Buzzer setup succeeded.")
+    #                 return True
+    #             else:
+    #                 print(f"❌ Buzzer setup failed. Result code: 0x{result:02X}")
+    #                 return False
+    #         else:
+    #             # print(f"❌ Unexpected MID in response: 0x{response['mid']:02X}")
+    #             return False
+
+    #     except Exception as e:
+    #         print(f"❌ Exception in set_beeper: {e}")
+    #         return False
+
+
+    def get_beeper(self, status: int) -> bool:
         """
-        try:
-            
-            # Use the corrected MID with the proper category
-            mid = MID.BUZZER_SWITCH
-            self.uart.flush_input()  # Clear any previous data in the UART buffer
-            # Build the payload for the buzzer control command
-            payload = bytes([0x01])  # 0x01 indicates "upper computer control"
-            
+        Wrapper to control whether the buzzer should be triggered.
 
-            # Build the communication frame
-            frame = self.build_frame(mid, payload, rs485=False)
-            
-            self.send(frame)
-
-            # Receive and parse the response
-            raw_response = self.receive(64)
-            response = self.parse_frame(raw_response)
-
-            # Check the response MID and result
-            if response["mid"] == (mid & 0xFF):  # Compare only the MID part
-                result = response["data"][0] if len(response["data"]) > 0 else -1
-                if result == 0x00:
-                    print("✅ Buzzer setup succeeded.")
-                    return True
-                else:
-                    print(f"❌ Buzzer setup failed. Result code: 0x{result:02X}")
-                    return False
-            else:
-                print(f"❌ Unexpected MID in response: 0x{response['mid']:02X}")
-                return False
-
-        except Exception as e:
-            print(f"❌ Exception in set_beeper: {e}")
+        :param status: 0 to skip, 1 to trigger a beep
+        :return: True if beep was triggered successfully, False otherwise
+        """
+        if status == 0:
             return False
+        elif status == 1:
             
-    def control_buzzer(self, ring: int, duration: int) -> bool:
+            return self.set_beeper(ring=1, duration=1)
+        else:
+            print(f"⚠️ Invalid beep status: {status}")
+            return False         
+    def set_beeper(self, ring: int, duration: int) -> bool:
         """
         Controls the buzzer directly.
         Sends MID=0x1F to make the buzzer ring or stop.
@@ -1181,21 +1198,23 @@ class NationReader:
 
         try:
             self.uart.flush_input()  # Clear any previous data in the UART buffer
+            if ring == 0:
+                return False
             # Build the payload for the buzzer control command
             payload = bytes([ring, duration])
-            print(f"📦 Buzzer control payload: {payload.hex()}")
+            # print(f"📦 Buzzer control payload: {payload.hex()}")
 
             # Build the communication frame with the correct category and MID
             mid = (0x01 << 8) | 0x1F  # Category 0x01, MID 0x1F
             frame = self.build_frame(mid=mid, payload=payload, rs485=self.rs485)
-            print(f"📤 Sending buzzer control frame: {frame.hex()}")
+            # print(f"📤 Sending buzzer control frame: {frame.hex()}")
 
             # Send the frame
             self.send(frame)
 
             # Receive and parse the response
             raw_response = self.receive(64)
-            print(f"📥 Received raw response: {raw_response.hex()}")
+            # print(f"📥 Received raw response: {raw_response.hex()}")
 
             # Validate the response frame
             if len(raw_response) < 9:
@@ -1210,19 +1229,20 @@ class NationReader:
             if response["mid"] == (mid & 0xFF):  # Compare only the MID part
                 result = response["data"][0] if len(response["data"]) > 0 else -1
                 if result == 0x00:
-                    print("✅ Buzzer control succeeded.")
+                    # print("✅ Buzzer control succeeded.")
                     return True
                 else:
                     print(f"❌ Buzzer control failed. Result code: 0x{result:02X}")
                     return False
             elif response["mid"] == 0x00:  # Handle illegal instruction response
                 error_code = response["data"][0] if len(response["data"]) > 0 else -1
-                print(f"🚨 Illegal instruction response. Error code: 0x{error_code:02X}")
+                
+                # print(f"🚨 Illegal instruction response. Error code: 0x{error_code:02X}")
                 return False
             else:
-                print(f"❌ Unexpected MID in response: 0x{response['mid']:02X}")
+                # print(f"❌ Unexpected MID in response: 0x{response['mid']:02X}")
                 return False
 
         except Exception as e:
-            print(f"❌ Exception in control_buzzer: {e}")
+            # print(f"❌ Exception in control_buzzer: {e}")
             return False

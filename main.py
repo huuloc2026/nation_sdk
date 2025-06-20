@@ -23,8 +23,7 @@ def on_tag_callback(tag: dict) -> str:
     }
     print(json.dumps(payload))
     try:
-        beeper = reader.set_beeper()
-        if beeper:
+        if reader.get_beeper(1):
             threading.Thread(target=beep, daemon=True).start()
     except Exception as e:
         print(f"⚠️ Buzzer error: {e}")
@@ -69,13 +68,13 @@ def main():
     #     print(f"  {k}: {v}")
 
 
-    # setPower = {
-    #     1:5, 
-    #     2:1,
-    #     3:1,
-    #     4:1
-    # }
-    # reader.configure_reader_power(setPower, persistence=True)
+    setPower = {
+        1:33, 
+        2:1,
+        3:1,
+        4:1
+    }
+    reader.configure_reader_power(setPower, persistence=True)
     # powers = reader.query_reader_power()
     # for ant in range(1, 5):
     #     val = powers.get(ant)
@@ -85,9 +84,9 @@ def main():
     #         print(f"  ⚠️ Antenna {ant}: N/A")
     
     reader.stop_inventory()
-    # setBeeper = reader.set_beeper()
-
-    # reader.control_buzzer(1, 1)  
+    
+    
+    
     
     try:
         print("▶️ Bắt đầu đọc tag (ấn Ctrl+C để dừng)...")
@@ -95,7 +94,7 @@ def main():
         time.sleep(1000)
         
     except KeyboardInterrupt:
-
+        reader.stop_inventory()
         print("\n🛑 Đã nhận Ctrl+C – dừng đọc tag...")
         
     finally:
