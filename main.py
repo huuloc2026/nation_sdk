@@ -52,7 +52,14 @@ def main():
         print("❌ Initialization failed.")
         return
 
+    
+    
 
+
+    # if reader.set_session(1):
+    #     print("Session successfully set to 1.")
+    # if reader.set_session(1):
+    #     print("Session successfully set to 1.")
     # Enable các anten hub 1, 2, 3
     # for a in [1, 2, 3]:
     #     reader.enable_ant(a)
@@ -68,13 +75,13 @@ def main():
     #     print(f"  {k}: {v}")
 
 
-    setPower = {
-        1:33, 
-        2:1,
-        3:1,
-        4:1
-    }
-    reader.configure_reader_power(setPower, persistence=True)
+    # setPower = {
+    #     1:33, 
+    #     2:1,
+    #     3:1,
+    #     4:1
+    # }
+    # reader.configure_reader_power(setPower, persistence=True)
     # powers = reader.query_reader_power()
     # for ant in range(1, 5):
     #     val = powers.get(ant)
@@ -88,9 +95,15 @@ def main():
     
     
     
+    profile = reader.get_profile()
+    print("📊 Current baseband profile:", profile)
     try:
         print("▶️ Bắt đầu đọc tag (ấn Ctrl+C để dừng)...")
+    
         reader.start_inventory(on_tag=on_tag_callback, on_inventory_end=on_end_callback)
+        # reader.start_inventory_with_mode(mode=0,callback=on_tag_callback)
+        print("Current baseband profile:", profile)
+   
         time.sleep(1000)
         
     except KeyboardInterrupt:

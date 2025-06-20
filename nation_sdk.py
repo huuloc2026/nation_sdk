@@ -128,8 +128,12 @@ class MID(IntEnum):
 
 
     # RFID Baseband
-    CONFIG_BASEBAND = 0x0B00
-    QUERY_BASEBAND = 0x0C00
+    CONFIG_BASEBAND = (0x01 << 8) | 0x0B
+    QUERY_BASEBAND =  0x0C
+    
+    
+    #Session Management
+    SESSION = 0x03
     # Power Control
     CONFIGURE_READER_POWER = 0x0201
     QUERY_READER_POWER = 0x0202
@@ -695,6 +699,51 @@ class NationReader:
         self._inventory_thread = threading.Thread(target=self._receive_inventory_loop)
         self._inventory_thread.start()
 
+    def start_inventory_with_mode(self, mode: int = 0, callback=None) -> bool:
+        """
+        Set baseband mode, then start inventory.
+        """
+        profiles = {
+            0: dict(speed=3, session=0, q=0, flag=2),   # Fast inventory
+            1: dict(speed=1, session=2, q=4, flag=0),   # Dense tag environment
+            2: dict(speed=255, session=1, q=5, flag=2), # Auto speed
+        }
+
+        if mode not in profiles:
+            print(f"❌ Invalid mode: {mode}")
+            return False
+
+        config = profiles[mode]
+
+        # 1. Set baseband parameters first
+        if not self.set_baseband_params(
+            speed=config['speed'],
+            q_value=config['q'],
+            session=config['session'],
+            inventory_flag=config['flag']
+        ):
+            print("❌ Failed to set baseband parameters. Inventory not started.")
+            return False
+
+        try:
+            self.uart.flush_input()
+            self._inventory_running = True
+            self._on_tag = callback
+            self._on_inventory_end = None
+
+            payload = self.build_epc_read_payload()
+            frame = self.build_frame(mid=MID.READ_EPC_TAG, payload=payload, rs485=self.rs485)
+            self.send(frame)
+            print(f"🚀 Inventory started with mode {mode} (speed={config['speed']}, q={config['q']}, session={config['session']}, flag={config['flag']})")
+
+            self._inventory_thread = threading.Thread(target=self._receive_inventory_loop)
+            self._inventory_thread.start()
+
+            return True
+        except Exception as e:
+            print(f"❌ Exception in start_inventory_with_mode: {e}")
+            return False
+    
     def _receive_inventory_loop(self):
         while self._inventory_running:
             try:
@@ -864,6 +913,7 @@ class NationReader:
     #                            PROFILE HEADER                                    #
     ################################################################################
 
+
     def get_profile(self) -> dict:
         profile = {}
 
@@ -912,41 +962,63 @@ class NationReader:
             print(f"❌ Failed to get profile: {e}")
             return {"error": str(e)}
 
+
     def query_baseband_profile(self) -> dict:
         """
-        Queries baseband profile parameters: speed, Q, session, inventory flag.
-        MID = 0x0C00
-        Returns a dict or raises if invalid.
+        Query the current EPC baseband parameters from the RFID reader.
+
+        Uses MID = 0x0C (Query Baseband Parameter). No payload required.
+        Returns:
+            dict: {
+                "speed": int,           # EPC baseband speed (0,1,2,3,255)
+                "q_value": int,         # Q value (0–15)
+                "session": int,         # Session (0–3)
+                "inventory_flag": int   # Inventory flag (0–2)
+            }
+            Or empty dict {} on failure.
         """
         try:
+            if not self.uart:
+                raise Exception("UART not initialized")
+
             self.uart.flush_input()
-            frame = self.build_frame(MID.QUERY_BASEBAND, payload=b'', rs485=self.rs485)
+            frame = self.build_frame(MID.QUERY_BASEBAND, payload=b'', rs485=False)
             self.uart.send(frame)
 
-            time.sleep(0.1)
             raw = self.uart.receive(64)
             if not raw:
-                raise Exception("❌ No response for baseband profile.")
+                raise Exception("❌ No response received.")
 
-            frame = self.parse_frame(raw)
-            data = frame["data"]
-            if frame["mid"] != (MID.QUERY_BASEBAND & 0xFF):
-                raise Exception("❌ Unexpected MID in baseband response.")
+            print(f"📥 Raw baseband response: {raw.hex()}")  # Optional debug
 
+            response = self.parse_frame(raw)
+
+            # Reader error notification frame
+            if response["mid"] == 0x00:
+                err = response["data"][0]
+                print(f"❌ Reader returned error: 0x{err:02X}")
+                return {}
+
+            # Normal baseband response
+            if response["mid"] != (MID.QUERY_BASEBAND & 0xFF):
+                raise Exception(f"❌ Unexpected MID in baseband response: 0x{response['mid']:02X}")
+
+            data = response["data"]
             if len(data) < 4:
-                raise Exception("❌ Baseband profile response too short.")
+                raise Exception(f"❌ Baseband profile response too short: len={len(data)}")
 
             return {
-                "speed": data[0],          # Baseband speed index (Tari/Modulation/Link Frequency)
-                "q_value": data[1],        # Q value (0–15)
-                "session": data[2],        # Session (0–3)
-                "inventory_flag": data[3]  # Flag A/B/alternate
+                "speed": data[0],
+                "q_value": data[1],
+                "session": data[2],
+                "inventory_flag": data[3]
             }
 
         except Exception as e:
             print(f"❌ Error in query_baseband_profile: {e}")
             return {}
 
+    
     def query_rf_band(self) -> str:
         """
         Queries the current RF frequency band (e.g., FCC, ETSI, JP).
@@ -987,8 +1059,6 @@ class NationReader:
             print(f"❌ Error in query_rf_band: {e}")
             return "Error"
 
-
- 
 
     def set_rf_band(self, band_code: int, persistence: bool = True) -> bool:
         """
@@ -1125,49 +1195,6 @@ class NationReader:
     #                            BEEPER HEADER                                     #
     ################################################################################
     
-    # def get_beeper(self) -> bool:
-    #     """
-    #     Configures the RFID reader's buzzer functionality to be controlled by the upper computer.
-    #     Sends MID=0x1E with the correct category (0x01) and payload=0x01 to enable upper computer control.
-        
-    #     :return: True if the setup succeeded, False otherwise.
-    #     """
-    #     try:
-            
-    #         # Use the corrected MID with the proper category
-    #         mid = MID.BUZZER_SWITCH
-    #         self.uart.flush_input()  # Clear any previous data in the UART buffer
-    #         # Build the payload for the buzzer control command
-    #         payload = bytes([0x01])  # 0x01 indicates "upper computer control"
-            
-
-    #         # Build the communication frame
-    #         frame = self.build_frame(mid, payload, rs485=False)
-            
-    #         self.send(frame)
-
-    #         # Receive and parse the response
-    #         raw_response = self.receive(64)
-    #         response = self.parse_frame(raw_response)
-
-    #         # Check the response MID and result
-    #         if response["mid"] == (mid & 0xFF):  # Compare only the MID part
-    #             result = response["data"][0] if len(response["data"]) > 0 else -1
-    #             if result == 0x00:
-    #                 self.buzzer_control_enabled = True
-    #                 # print("✅ Buzzer setup succeeded.")
-    #                 return True
-    #             else:
-    #                 print(f"❌ Buzzer setup failed. Result code: 0x{result:02X}")
-    #                 return False
-    #         else:
-    #             # print(f"❌ Unexpected MID in response: 0x{response['mid']:02X}")
-    #             return False
-
-    #     except Exception as e:
-    #         print(f"❌ Exception in set_beeper: {e}")
-    #         return False
-
 
     def get_beeper(self, status: int) -> bool:
         """
@@ -1179,11 +1206,11 @@ class NationReader:
         if status == 0:
             return False
         elif status == 1:
-            
             return self.set_beeper(ring=1, duration=1)
         else:
             print(f"⚠️ Invalid beep status: {status}")
             return False         
+   
     def set_beeper(self, ring: int, duration: int) -> bool:
         """
         Controls the buzzer directly.
@@ -1245,4 +1272,216 @@ class NationReader:
 
         except Exception as e:
             # print(f"❌ Exception in control_buzzer: {e}")
+            return False
+        
+
+
+        ## Get Session
+    
+
+    #################################################################################
+    #                            SESSION HEADER                                     #
+    #################################################################################
+
+
+    def get_session(self) -> Optional[int]:
+        """
+        Queries the current EPC baseband Session using MID = 0x0B and PID = 0x03.
+        :return: Session value (0, 1, 2, 3) or None if failed.
+        """
+        try:
+            if not self.is_idle():
+                print("❌ Reader not idle. Cannot query session.")
+                return None
+
+            self.uart.flush_input()
+
+            # MID = 0x0B, PID = 0x03 (Session)
+            payload = bytes([0x03])
+            frame = self.build_frame(mid=MID.CONFIG_BASEBAND, payload=payload, rs485=self.rs485)
+            self.uart.send(frame)
+
+            raw = self.uart.receive(64)
+            if not raw:
+                print("❌ No response for session query.")
+                return None
+
+            print(f"📥 Raw response: {raw.hex()}")
+            response = self.parse_frame(raw)
+
+            if response["mid"] == 0x00:
+                error = response["data"][0]
+                print(f"❌ Session query failed. Error: 0x{error:02X}")
+                return None
+
+            if response["mid"] != MID.CONFIG_BASEBAND:
+                print(f"❌ Unexpected response MID: 0x{response['mid']:04X}")
+                return None
+
+            data = response["data"]
+            if len(data) < 2 or data[0] != 0x03:
+                print(f"❌ Invalid PID or response length in session query: {data.hex()}")
+                return None
+
+            session = data[1]
+            if session in (0, 1, 2, 3):
+                print(f"✅ Current session: {session}")
+                return session
+            else:
+                print(f"❌ Invalid session value: {session}")
+                return None
+
+        except Exception as e:
+            print(f"❌ Exception in get_session: {e}")
+            return None
+
+
+    def set_session(self, session: int) -> bool:
+        """
+        Sets the EPC baseband Session parameter using MID = 0x0B and PID = 0x03.
+        :param session: Must be 0, 1, 2, or 3
+        :return: True if successful, False otherwise
+        """
+        try:
+            if session not in (0, 1, 2, 3):
+                print(f"❌ Invalid session value: {session}")
+                return False
+
+            if not self.is_idle():
+                print("❌ Reader not idle.")
+                return False
+
+            self.uart.flush_input()
+            payload = bytes([0x03, session])  # PID = 0x03, value = session
+            frame = self.build_frame(mid=0x0B, payload=payload)
+            self.uart.send(frame)
+
+            raw = self.uart.receive(64)
+            if not raw:
+                print("❌ No response for set session.")
+                return False
+
+            print(f"📥 Raw response: {raw.hex()}")
+            response = self.parse_frame(raw)
+
+            if response["mid"] == 0x00:
+                error = response["data"][0]
+                print(f"❌ Set session failed. Error: 0x{error:02X}")
+                return False
+
+            print("✅ Session set successfully.")
+            return True
+
+        except Exception as e:
+            print(f"❌ Exception in set_session: {e}")
+            return False
+
+         
+    def is_idle(self) -> bool:
+        """
+        Checks if the reader is in the Idle state.
+        Sends a STOP command and verifies the response.
+        :return: True if the reader is in Idle state, False otherwise.
+        """
+        try:
+            self.uart.flush_input()
+            stop_frame = self.build_frame(mid=MID.STOP_INVENTORY, payload=b'')
+            self.uart.send(stop_frame)
+
+            raw_response = self.uart.receive(64)
+            if not raw_response:
+                print("❌ No response received for Idle state check.")
+                return False
+
+            response = self.parse_frame(raw_response)
+            if response["mid"] == (MID.STOP_INVENTORY & 0xFF) and response["data"][0] == 0x00:
+                print("✅ Reader is in Idle state.")
+                return True
+            else:
+                print("❌ Reader is not in Idle state.")
+                return False
+
+        except Exception as e:
+            print(f"❌ Exception in is_idle: {e}")
+            return False
+
+    def set_baseband_params(self, speed: int = None, q_value: int = None, session: int = None, inventory_flag: int = None) -> bool:
+        """
+        Safely set EPC baseband parameters (Speed, Q, Session, InventoryFlag) if supported.
+        Allows partial setting. Only sends PIDs that are not None.
+        """
+        payload = bytearray()
+
+        if speed is not None:
+            if speed not in (0, 1, 2, 3, 4, 255):
+                print(f"❌ Invalid speed: {speed}")
+                return False
+            payload += bytes([0x01, speed])
+
+        if q_value is not None:
+            if not (0 <= q_value <= 15):
+                print(f"❌ Invalid Q value: {q_value}")
+                return False
+            payload += bytes([0x02, q_value])
+
+        if session is not None:
+            if session not in (0, 1, 2, 3):
+                print(f"❌ Invalid session: {session}")
+                return False
+            payload += bytes([0x03, session])
+
+        if inventory_flag is not None:
+            if inventory_flag not in (0, 1, 2):
+                print(f"❌ Invalid inventory flag: {inventory_flag}")
+                return False
+            payload += bytes([0x04, inventory_flag])
+
+        if not payload:
+            print("⚠️ No parameters to set.")
+            return False
+
+        try:
+            if not self.is_idle():
+                print("❌ Reader not idle.")
+                return False
+
+            self.uart.flush_input()
+            frame = self.build_frame(mid=MID.CONFIG_BASEBAND, payload=payload, rs485=self.rs485)
+            self.uart.send(frame)
+
+            raw = self.uart.receive(64)
+            if not raw:
+                print("❌ No response for baseband config.")
+                return False
+
+            print(f"📥 Raw response: {raw.hex()}")
+            response = self.parse_frame(raw)
+
+            if response["mid"] == 0x00:
+                error = response["data"][0]
+                print(f"❌ Baseband config failed. Error: 0x{error:02X}")
+                return False
+
+            if response["mid"] != (MID.CONFIG_BASEBAND & 0xFF):
+                print(f"❌ Unexpected response MID: 0x{response['mid']:02X}")
+                return False
+
+            result = response["data"][0]
+            if result == 0x00:
+                print("✅ Baseband parameters set successfully.")
+                return True
+            else:
+                error_map = {
+                    0x01: "Baseband unsupported by reader",
+                    0x02: "Q value parameter error",
+                    0x03: "Session parameter error",
+                    0x04: "Inventory taking parameter error",
+                    0x05: "Other parameter errors",
+                    0x06: "Save failed"
+                }
+                print(f"❌ Failed to set baseband params: {error_map.get(result, 'Unknown error')}")
+                return False
+
+        except Exception as e:
+            print(f"❌ Exception in set_baseband_params: {e}")
             return False
