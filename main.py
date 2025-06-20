@@ -1,9 +1,19 @@
 from nation_sdk import NationReader
 import time
 import json
+import threading
+import subprocess
 
-
-
+def beep():
+    try:
+        subprocess.Popen(
+            ["ffplay", "-nodisp", "-autoexit", "beep.mp3"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+    except Exception as e:
+        print(f"⚠️ Beep error: {e}")
+        
 def on_tag_callback(tag: dict) -> str:
     payload = {
         "epc": tag.get("epc"),
@@ -12,6 +22,13 @@ def on_tag_callback(tag: dict) -> str:
         "status": "tag_detected"
     }
     print(json.dumps(payload))
+    try:
+        beeper = reader.set_beeper()
+        if beeper:
+            threading.Thread(target=beep, daemon=True).start()
+    except Exception as e:
+        print(f"⚠️ Buzzer error: {e}")
+
     return json.dumps(payload)
 
 def on_end_callback(reason):
@@ -24,6 +41,7 @@ def on_end_callback(reason):
     
     
 def main():
+    global reader
     port = "/dev/ttyUSB0"
     baud = 115200
     reader = NationReader(port, baud)
@@ -34,14 +52,13 @@ def main():
     if not reader.Connect_Reader_And_Initialize():
         print("❌ Initialization failed.")
         return
-    # STOP để vào IDLE trước khi cấu hình antenna hub
-    # reader.stop_inventory()
+
 
     # Enable các anten hub 1, 2, 3
     # for a in [1, 2, 3]:
     #     reader.enable_ant(a)
 
-    # print("🧮 Enabled ant mask:", bin(reader.query_enabled_ant_mask()))
+    
     
     
     # print("✅ Danh sách anten đang bật:", reader.get_enabled_ants())
@@ -51,7 +68,14 @@ def main():
     # for k, v in info.items():
     #     print(f"  {k}: {v}")
 
-    # print("\n🔍 Querying antenna power levels...")
+
+    # setPower = {
+    #     1:5, 
+    #     2:1,
+    #     3:1,
+    #     4:1
+    # }
+    # reader.configure_reader_power(setPower, persistence=True)
     # powers = reader.query_reader_power()
     # for ant in range(1, 5):
     #     val = powers.get(ant)
@@ -59,22 +83,31 @@ def main():
     #         print(f"  🔧 Antenna {ant}: {val} dBm")
     #     else:
     #         print(f"  ⚠️ Antenna {ant}: N/A")
-
-    reader.configure_reader_power({1: 30, 2: 25}, persistence=True)
-    actual = reader.query_power(1)
-    print(f"🧪 Đã set: 30dBm – Reader báo lại: {actual}dBm")
-    reader.start_inventory(on_tag=on_tag_callback, on_inventory_end=on_end_callback)
-    time.sleep(10)
     
+    reader.stop_inventory()
+    # setBeeper = reader.set_beeper()
 
-    success = reader.stop_inventory()
-    if success:
-        print("✅ Inventory đã dừng thành công")
-    else:
-        print("❌ Không thể dừng reader")
+    # reader.control_buzzer(1, 1)  
     
-    reader.close()
-    print("🔌 Đóng kết nối UART")
+    try:
+        print("▶️ Bắt đầu đọc tag (ấn Ctrl+C để dừng)...")
+        reader.start_inventory(on_tag=on_tag_callback, on_inventory_end=on_end_callback)
+        time.sleep(1000)
+        
+    except KeyboardInterrupt:
+
+        print("\n🛑 Đã nhận Ctrl+C – dừng đọc tag...")
+        
+    finally:
+        success = reader.stop_inventory()
+        
+        if success:
+            print("✅ Inventory đã dừng thành công")
+        else:
+            print("❌ Không thể dừng reader")
+        reader.close()
+        print("🔌 Đóng kết nối UART")
+
 
 if __name__ == "__main__":
     main()

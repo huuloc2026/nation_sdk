@@ -1,6 +1,7 @@
 import serial
-import struct
+
 import time
+
 import threading
 from enum import IntEnum, unique
 from typing import Callable, Optional,Tuple
@@ -21,6 +22,7 @@ READER_NOTIFY_FLAG = 0x00  # Set to 0 for upper computer commands
 
 PROTO_TYPE = 0x00
 PROTO_VER = 0x01
+
 
 
 class UARTConnection:
@@ -134,6 +136,10 @@ class MID(IntEnum):
     SET_READER_POWER_CALIBRATION = 0x0103
     # RFID Capability
     QUERY_RFID_ABILITY = (0x05 << 8) | 0x00
+    
+    
+    # Buzzer Control
+    BUZZER_SWITCH = (0x01 << 8) | 0x1E
 
 
 class NationReader:
@@ -194,10 +200,12 @@ class NationReader:
         addr_bytes = b'\x00' if rs485 else b''
         length_bytes = len(payload).to_bytes(2, 'big')
 
+
         frame_content = pcw_bytes + addr_bytes + length_bytes + payload
         crc_bytes = cls.crc16_ccitt(frame_content).to_bytes(2, 'big')
 
         return frame_header + frame_content + crc_bytes
+ 
 
     @classmethod
     def build_pcw(cls, category: int, mid: int, rs485=False, notify=False) -> int:
@@ -569,7 +577,6 @@ class NationReader:
                     power_dbm = data[offset + 1] # Value is power in dBm [19]
                     power_settings[ant_id] = power_dbm
                     offset += 2
-                print(f"✅ Reader power settings queried: {power_settings}")
                 return power_settings
             else:
                 print("❌ Unexpected response MID for power query.")
@@ -592,13 +599,21 @@ class NationReader:
         if not antenna_powers:
             print("❌ No antenna powers provided for configuration.")
             return False
+        if not isinstance(antenna_powers, dict):
+            print("❌ antenna_powers must be a dictionary of {int: int}.")
+            return False
+
+        for ant_id, power_dbm in antenna_powers.items():
+            if not isinstance(ant_id, int) or not isinstance(power_dbm, int):
+                print(f"❌ Invalid types: antenna ID and power must both be integers. Got ({type(ant_id)}, {type(power_dbm)}).")
+                return False
  
         payload_parts = []
         for ant_id, power_dbm in antenna_powers.items():
             if not (1 <= ant_id <= 64):
                 print(f"❌ Invalid antenna ID: {ant_id}. Must be between 1 and 64.")
                 return False
-            if not (0 <= power_dbm <= 36): # Max power is 36dBm [18]
+            if not (0 <= power_dbm <= 33): # Max power is 36dBm [18]
                 print(f"❌ Invalid power level for antenna {ant_id}: {power_dbm}dBm. Must be between 0 and 36dBm.")
                 return False
             payload_parts.append(ant_id.to_bytes(1, 'big')) # PID for antenna [17]
@@ -635,19 +650,21 @@ class NationReader:
  
             # Expected response MID is 0x01 (from CONFIGURE_READER_POWER) [5]
             # Data should contain configuration result (0x00 for success) [19]
-            if mid == (MID.CONFIGURE_READER_POWER & 0xFF) and len(data) >= 1 and data == 0x00:
-                print("✅ Reader power configured successfully.")
-                return True
-            else:
-                result_code = data if len(data) >= 1 else -1
-                error_map = {
-                    0x01: "the reader hardware does not support the port parameter", # [19]
-                    0x02: "The reader does not support the power parameter",       # [19]
-                    0x03: "Save failed"                                          # [19]
-                }
-                error_msg = error_map.get(result_code, "unknown error")
-                print(f"❌ Failed to configure reader power. Result code: 0x{result_code:02X} ({error_msg})")
-                return False
+            if mid == (MID.CONFIGURE_READER_POWER & 0xFF) and len(data) >= 1:
+                result_code = data[0]
+                if result_code == 0x00:
+                    print("✅ Reader power configured successfully.")
+                    return True
+                else:
+                    result_code = data if len(data) >= 1 else -1
+                    error_map = {
+                        0x01: "the reader hardware does not support the port parameter", 
+                        0x02: "The reader does not support the power parameter",      
+                        0x03: "Save failed"                                         
+                    }
+                    error_msg = error_map.get(result_code, "unknown error")
+                    print(f"❌ Failed to configure reader power. Result code: 0x{result_code:02X} ({error_msg})")
+                    return False
  
         except Exception as e:
             print(f"❌ Exception during power configuration: {e}")
@@ -694,6 +711,10 @@ class NationReader:
                         print(f"⚠️ Parse error: {tag['error']}")
                     else:
                         # print(f"📦 Tag EPC: {tag['epc']}, RSSI: {tag['rssi']}, Ant: {tag['antenna_id']}")
+                        
+                        self._inventory_running = False
+                        self.uart.flush_input() 
+                        self._inventory_running = True
                         if self._on_tag:
                             self._on_tag(tag)
 
@@ -838,3 +859,370 @@ class NationReader:
     def get_enabled_ants(self) -> list[int]:
         mask = self.query_enabled_ant_mask()
         return [i+1 for i in range(16) if (mask >> i) & 1]
+
+    ################################################################################
+    #                            PROFILE HEADER                                    #
+    ################################################################################
+
+    def get_profile(self) -> dict:
+        profile = {}
+
+        try:
+            # Enabled antennas
+            enabled_mask = self.query_enabled_ant_mask()
+            profile["enabled_antennas"] = [i for i in range(1, 65) if (enabled_mask >> (i - 1)) & 1]
+
+            # Antenna powers
+            powers = self.query_reader_power()
+            profile["antenna_powers"] = powers
+
+            # Baseband parameters
+            baseband = self.query_baseband_profile()
+            profile["baseband"] = {
+                "speed": baseband.get("speed"),         # e.g. Tari/Modulation
+                "q_value": baseband.get("q_value"),
+                "session": baseband.get("session"),
+                "inventory_flag": baseband.get("inventory_flag")
+            }
+            
+            
+
+            # Frequency band
+            freq_band = self.query_rf_band()
+            profile["rf_band"] = freq_band  # e.g., FCC, ETSI, JP, etc.
+
+            # Working frequency channels
+            working_freq = self.query_working_frequency()
+            profile["working_frequency"] = working_freq  # e.g., auto or list of channels
+
+            # Tag filtering
+            filtering = self.query_filter_settings()
+            profile["filtering"] = {
+                "repeat_time_ms": filtering.get("repeat_time", 0) * 10,
+                "rssi_threshold": filtering.get("rssi_threshold")
+            }
+
+            # # Optional: Reader info
+            info = self.Query_Reader_Information()
+            profile["reader_info"] = info
+
+            return profile
+
+        except Exception as e:
+            print(f"❌ Failed to get profile: {e}")
+            return {"error": str(e)}
+
+    def query_baseband_profile(self) -> dict:
+        """
+        Queries baseband profile parameters: speed, Q, session, inventory flag.
+        MID = 0x0C00
+        Returns a dict or raises if invalid.
+        """
+        try:
+            self.uart.flush_input()
+            frame = self.build_frame(MID.QUERY_BASEBAND, payload=b'', rs485=self.rs485)
+            self.uart.send(frame)
+
+            time.sleep(0.1)
+            raw = self.uart.receive(64)
+            if not raw:
+                raise Exception("❌ No response for baseband profile.")
+
+            frame = self.parse_frame(raw)
+            data = frame["data"]
+            if frame["mid"] != (MID.QUERY_BASEBAND & 0xFF):
+                raise Exception("❌ Unexpected MID in baseband response.")
+
+            if len(data) < 4:
+                raise Exception("❌ Baseband profile response too short.")
+
+            return {
+                "speed": data[0],          # Baseband speed index (Tari/Modulation/Link Frequency)
+                "q_value": data[1],        # Q value (0–15)
+                "session": data[2],        # Session (0–3)
+                "inventory_flag": data[3]  # Flag A/B/alternate
+            }
+
+        except Exception as e:
+            print(f"❌ Error in query_baseband_profile: {e}")
+            return {}
+
+    def query_rf_band(self) -> str:
+        """
+        Queries the current RF frequency band (e.g., FCC, ETSI, JP).
+        MID = 0x0204
+        """
+        band_map = {
+            0x00: "China (920–925 / 840–845 MHz)",
+            0x01: "FCC (902–928 MHz)",
+            0x02: "ETSI (865–868 MHz)",
+            0x03: "Japan (916.8–920.4 MHz)",
+            0x04: "Taiwan (922.25–927.75 MHz)",
+            0x05: "Indonesia (923.125–925.125 MHz)",
+            0x06: "Russia (866.6–867.4 MHz)"
+        }
+
+        try:
+            self.uart.flush_input()
+            frame = self.build_frame(mid=0x0204, payload=b'', rs485=self.rs485)
+            self.uart.send(frame)
+
+            time.sleep(0.1)
+            raw = self.uart.receive(64)
+            if not raw:
+                raise Exception("❌ No response for RF band query.")
+
+            frame = self.parse_frame(raw)
+            if frame["mid"] != 0x04:
+                raise Exception("❌ Unexpected MID in RF band response.")
+
+            data = frame["data"]
+            if len(data) < 1:
+                raise Exception("❌ No band byte in response.")
+            band_code = data[0]
+            
+            return band_map.get(band_code, f"Unknown (code: 0x{band_code:02X})")
+
+        except Exception as e:
+            print(f"❌ Error in query_rf_band: {e}")
+            return "Error"
+
+
+ 
+
+    def set_rf_band(self, band_code: int, persistence: bool = True) -> bool:
+        """
+        Sets the RF frequency band.
+        MID = 0x0203
+
+        :param band_code: Band code (0x00–0x06)
+        :param persistence: True to save after reboot, False for temporary
+        :return: True if success, False otherwise
+        """
+        band_names = {
+            0x00: "China (840–845 + 920–925 MHz)",
+            0x01: "FCC (902–928 MHz)",
+            0x02: "ETSI (865–868 MHz)",
+            0x03: "Japan (916.8–920.4 MHz)",
+            0x04: "Taiwan (922.25–927.75 MHz)",
+            0x05: "Indonesia (923.125–925.125 MHz)",
+            0x06: "Russia (866.6–867.4 MHz)"
+        }
+
+        if band_code not in band_names:
+            print(f"❌ Invalid RF band code: 0x{band_code:02X}")
+            return False
+
+        try:
+            self.uart.flush_input()
+            payload = bytes([band_code, 0x01 if persistence else 0x00])
+            frame = self.build_frame(mid=0x0203, payload=payload, rs485=self.rs485)
+            self.uart.send(frame)
+
+            time.sleep(0.1)
+            raw = self.uart.receive(64)
+            if not raw:
+                print("❌ No response from reader.")
+                return False
+
+            parsed = self.parse_frame(raw)
+            data = parsed["data"]
+
+            if parsed["mid"] != 0x03:
+                print(f"❌ Unexpected MID in response: 0x{parsed['mid']:02X}")
+                return False
+
+            if len(data) < 1 or data[0] != 0x00:
+                print(f"❌ Failed to set RF band. Result code: 0x{data[0]:02X}")
+                return False
+
+            print(f"✅ RF band set to {band_names[band_code]}")
+            return True
+
+        except Exception as e:
+            print(f"❌ Exception in set_rf_band: {e}")
+        return False
+
+
+    def query_working_frequency(self) -> dict:
+        """
+        Queries the reader's working frequency configuration.
+        MID = 0x0206
+        Returns:
+            {
+                'mode': 'auto' | 'manual',
+                'channels': list of channel numbers (if manual)
+            }
+        """
+        try:
+            self.uart.flush_input()
+            frame = self.build_frame(mid=0x0206, payload=b'', rs485=self.rs485)
+            self.uart.send(frame)
+
+            time.sleep(0.1)
+            raw = self.uart.receive(64)
+            if not raw:
+                raise Exception("No response for working frequency query")
+
+            parsed = self.parse_frame(raw)
+            if parsed["mid"] != 0x06:
+                raise Exception("Unexpected MID")
+
+            data = parsed["data"]
+            if not data:
+                return {"mode": "unknown", "channels": []}
+
+            if data[0] == 0x00:
+                return {"mode": "auto", "channels": []}
+            elif data[0] == 0x01:
+                channels = list(data[1:])
+                return {"mode": "manual", "channels": channels}
+            else:
+                return {"mode": f"unknown (0x{data[0]:02X})", "channels": []}
+
+        except Exception as e:
+            print(f"❌ Error in query_working_frequency: {e}")
+            return {"mode": "error", "channels": []}
+
+    def query_filter_settings(self) -> dict:
+        """
+        Queries tag filtering settings:
+        - Repeat tag suppression time (in 10ms units)
+        - RSSI threshold
+        MID = 0x020A
+        """
+        try:
+            self.uart.flush_input()
+            frame = self.build_frame(mid=0x020A, payload=b'', rs485=self.rs485)
+            self.uart.send(frame)
+
+            time.sleep(0.1)
+            raw = self.uart.receive(64)
+            if not raw:
+                raise Exception("No response for filter settings query")
+
+            parsed = self.parse_frame(raw)
+            if parsed["mid"] != 0x0A:
+                raise Exception("Unexpected MID")
+
+            data = parsed["data"]
+            if len(data) < 2:
+                raise Exception("Insufficient data")
+
+            repeat_time = int.from_bytes(data[0:2], 'big')  # units of 10ms
+            rssi_threshold = data[2] if len(data) >= 3 else None
+
+            return {
+                "repeat_time": repeat_time,
+                "rssi_threshold": rssi_threshold
+            }
+
+        except Exception as e:
+            print(f"❌ Error in query_filter_settings: {e}")
+            return {"repeat_time": 0, "rssi_threshold": None}
+
+    ################################################################################
+    #                            BEEPER HEADER                                     #
+    ################################################################################
+    
+    def set_beeper(self) -> bool:
+        """
+        Configures the RFID reader's buzzer functionality to be controlled by the upper computer.
+        Sends MID=0x1E with the correct category (0x01) and payload=0x01 to enable upper computer control.
+        
+        :return: True if the setup succeeded, False otherwise.
+        """
+        try:
+            
+            # Use the corrected MID with the proper category
+            mid = MID.BUZZER_SWITCH
+            self.uart.flush_input()  # Clear any previous data in the UART buffer
+            # Build the payload for the buzzer control command
+            payload = bytes([0x01])  # 0x01 indicates "upper computer control"
+            
+
+            # Build the communication frame
+            frame = self.build_frame(mid, payload, rs485=False)
+            
+            self.send(frame)
+
+            # Receive and parse the response
+            raw_response = self.receive(64)
+            response = self.parse_frame(raw_response)
+
+            # Check the response MID and result
+            if response["mid"] == (mid & 0xFF):  # Compare only the MID part
+                result = response["data"][0] if len(response["data"]) > 0 else -1
+                if result == 0x00:
+                    print("✅ Buzzer setup succeeded.")
+                    return True
+                else:
+                    print(f"❌ Buzzer setup failed. Result code: 0x{result:02X}")
+                    return False
+            else:
+                print(f"❌ Unexpected MID in response: 0x{response['mid']:02X}")
+                return False
+
+        except Exception as e:
+            print(f"❌ Exception in set_beeper: {e}")
+            return False
+            
+    def control_buzzer(self, ring: int, duration: int) -> bool:
+        """
+        Controls the buzzer directly.
+        Sends MID=0x1F to make the buzzer ring or stop.
+        
+        :param ring: 0 = stop, 1 = ring
+        :param duration: 0 = ring once, 1 = keep ringing
+        :return: True if the command succeeded, False otherwise.
+        """
+        if ring not in (0, 1) or duration not in (0, 1):
+            raise ValueError("Invalid parameters: ring and duration must be 0 or 1")
+
+        try:
+            self.uart.flush_input()  # Clear any previous data in the UART buffer
+            # Build the payload for the buzzer control command
+            payload = bytes([ring, duration])
+            print(f"📦 Buzzer control payload: {payload.hex()}")
+
+            # Build the communication frame with the correct category and MID
+            mid = (0x01 << 8) | 0x1F  # Category 0x01, MID 0x1F
+            frame = self.build_frame(mid=mid, payload=payload, rs485=self.rs485)
+            print(f"📤 Sending buzzer control frame: {frame.hex()}")
+
+            # Send the frame
+            self.send(frame)
+
+            # Receive and parse the response
+            raw_response = self.receive(64)
+            print(f"📥 Received raw response: {raw_response.hex()}")
+
+            # Validate the response frame
+            if len(raw_response) < 9:
+                raise ValueError("Frame too short")
+            if raw_response[0] != FRAME_HEADER:
+                raise ValueError("Invalid frame header")
+
+            # Parse the response
+            response = self.parse_frame(raw_response)
+
+            # Check the response MID and result
+            if response["mid"] == (mid & 0xFF):  # Compare only the MID part
+                result = response["data"][0] if len(response["data"]) > 0 else -1
+                if result == 0x00:
+                    print("✅ Buzzer control succeeded.")
+                    return True
+                else:
+                    print(f"❌ Buzzer control failed. Result code: 0x{result:02X}")
+                    return False
+            elif response["mid"] == 0x00:  # Handle illegal instruction response
+                error_code = response["data"][0] if len(response["data"]) > 0 else -1
+                print(f"🚨 Illegal instruction response. Error code: 0x{error_code:02X}")
+                return False
+            else:
+                print(f"❌ Unexpected MID in response: 0x{response['mid']:02X}")
+                return False
+
+        except Exception as e:
+            print(f"❌ Exception in control_buzzer: {e}")
+            return False
