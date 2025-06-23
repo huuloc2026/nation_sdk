@@ -51,7 +51,16 @@ def main():
     if not reader.Connect_Reader_And_Initialize():
         print("❌ Initialization failed.")
         return
-
+    
+    # test = reader.query_baseband_profile()
+    # print("📊 Baseband profile:", test)
+    # session = reader.get_session()
+    
+  
+    setSession = reader.configure_reader_session(session=1)
+    
+    
+    
     
     
 
@@ -90,19 +99,30 @@ def main():
     #     else:
     #         print(f"  ⚠️ Antenna {ant}: N/A")
     
-    reader.stop_inventory()
     
     
     
+    # Set all baseband parameters
+    # reader.set_baseband_params(speed=3, q_value=4, session=2, inventory_flag=0)
+
+   
+
+    # test = reader.query_baseband_profile(verbose=True)
+    # print("📊 Baseband profile:", test)
     
-    profile = reader.get_profile()
-    print("📊 Current baseband profile:", profile)
+    # if success:
+    #     print("🎉 Baseband successfully configured.")
+    # else:
+    #     print("❌ Baseband configuration failed.")
+    
+
+ 
     try:
         print("▶️ Bắt đầu đọc tag (ấn Ctrl+C để dừng)...")
     
-        reader.start_inventory(on_tag=on_tag_callback, on_inventory_end=on_end_callback)
-        # reader.start_inventory_with_mode(mode=0,callback=on_tag_callback)
-        print("Current baseband profile:", profile)
+        # reader.start_inventory(on_tag=on_tag_callback, on_inventory_end=on_end_callback)
+        reader.start_inventory_with_mode(mode=0,callback=on_tag_callback)
+       
    
         time.sleep(1000)
         
