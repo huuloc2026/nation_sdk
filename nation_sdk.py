@@ -40,6 +40,9 @@ class UARTConnection:
         self.lock = threading.Lock()
         self._inventory_running = False
         self._inventory_thread = None
+        
+        # 0 = No Beep, 1 = Always Beep, 2 = Beep on New Tag
+        self.beeper_mode = 0
 
     def open(self):
         """
@@ -636,7 +639,7 @@ class NationReader:
  
         try:
             self.uart.flush_input()
-            print(f"🚀 Sending Configure Reader Power command with payload: {full_payload.hex()}")
+            # print(f"🚀 Sending Configure Reader Power command with payload: {full_payload.hex()}")
             command_frame = self.build_frame(MID.CONFIGURE_READER_POWER, payload=full_payload, rs485=self.rs485)
             self.uart.send(command_frame)
  
@@ -717,10 +720,6 @@ class NationReader:
             print(f"❌ Invalid mode: {mode}")
             return False
 
-        if not self.select_profile(mode):
-            print("❌ Failed to set reader profile. Inventory not started.")
-            return False
-
         try:
             self.uart.flush_input()
             self._inventory_running = True
@@ -756,8 +755,6 @@ class NationReader:
                         print(f"⚠️ Parse error: {tag['error']}")
                     else:
                         # print(f"📦 Tag EPC: {tag['epc']}, RSSI: {tag['rssi']}, Ant: {tag['antenna_id']}")
-                        
-
                         if self._on_tag:
                             self._on_tag(tag)
 
@@ -908,8 +905,46 @@ class NationReader:
     ################################################################################
     #                            PROFILE HEADER                                    #
     ################################################################################
+    #TODO: It's not still optimise
+    def select_profile(self, profile_id: int) -> bool:
+        """
+        Selects a baseband profile by ID (0, 1, or 2).
+        Returns True if successful, False otherwise.
+        """
+        
+        if profile_id not in (0, 1, 2):
+            print(f"❌ Invalid profile ID: {profile_id}")
+            return False
 
+        try:
+            self.uart.flush_input()
+            payload = bytes([profile_id])
+            frame = self.build_frame(mid=0x020A, payload=payload, rs485=self.rs485)
+            self.uart.send(frame)
 
+            time.sleep(0.1)
+            raw = self.uart.receive(64)
+            if not raw:
+                print("❌ No response from reader.")
+                return False
+
+            parsed = self.parse_frame(raw)
+            if parsed["mid"] != 0x0A:
+                print(f"❌ Unexpected MID in response: 0x{parsed['mid']:02X}")
+                return False
+
+            data = parsed["data"]
+            if len(data) < 1 or data[0] != profile_id:
+                print(f"❌ Profile selection failed. Expected ID {profile_id}, got {data[0] if data else 'N/A'}")
+                return False
+
+            print(f"✅ Profile {profile_id} selected successfully.")
+            return True
+
+        except Exception as e:
+            print(f"❌ Exception during profile selection: {e}")
+            return False
+        
     def get_profile(self) -> dict:
         profile = {}
 
@@ -958,9 +993,6 @@ class NationReader:
             print(f"❌ Failed to get profile: {e}")
             return {"error": str(e)}
 
-
-
-
     def query_rf_band(self) -> str:
         """
         Queries the current RF frequency band (e.g., FCC, ETSI, JP).
@@ -1000,7 +1032,6 @@ class NationReader:
         except Exception as e:
             print(f"❌ Error in query_rf_band: {e}")
             return "Error"
-
 
     def set_rf_band(self, band_code: int, persistence: bool = True) -> bool:
         """
@@ -1137,23 +1168,46 @@ class NationReader:
     ################################################################################
     
 
-    def get_beeper(self, status: int) -> bool:
+    def get_beeper(self) -> bool:
         """
-        Wrapper to control whether the buzzer should be triggered.
+        Return True if beeping is allowed under current mode:
+        - Mode 1: Continuous beep
+        - Mode 2: Beep on new tag
+        - Mode 0: No beep
+        """
+        return getattr(self, 'beeper_mode', 0) in (1, 2)
 
-        :param status: 0 to skip, 1 to trigger a beep
-        :return: True if beep was triggered successfully, False otherwise
+
+    def set_beeper(self, mode: int) -> bool:
         """
-        if status == 0:
-            return False
-        elif status == 1:
-            return self.set_beeper(ring=1, duration=1)
+        Set the beeper mode:
+        0 = No Beep → stop buzzer now
+        1 = Continuous Beep → start buzzing immediately
+        2 = Beep on New Tag → do not buzz now, only on new tag events
+        
+        Returns True if the internal mode was set and hardware command (if any) succeeded.
+        """
+        if mode not in (0, 1, 2):
+            raise ValueError("Invalid mode: must be 0 (No Beep), 1 (Continuous), or 2 (New Tag)")
+
+        success = True
+
+        if mode == 0:
+            success = self._send_beeper_command(ring=0, duration=0)  # Stop beep
+        elif mode == 1:
+            success = self._send_beeper_command(ring=1, duration=1)  # Continuous beep
+        elif mode == 2:
+            # Do not buzz now; just set mode, used later during tag detection
+            pass
+
+        if success or mode == 2:
+            self.beeper_mode = mode  # Only set if command succeeded, or mode is 2 (no hardware call)
         else:
-            print(f"⚠️ Invalid beep status: {status}")
-            return False         
-   
-   
-    def set_beeper(self, ring: int, duration: int) -> bool:
+            print(f"⚠️ Failed to apply buzzer command for mode {mode}")
+
+        return success
+
+    def _send_beeper_command(self, ring: int, duration: int) -> bool:
         """
         Controls the buzzer directly.
         Sends MID=0x1F to make the buzzer ring or stop.
@@ -1167,8 +1221,6 @@ class NationReader:
 
         try:
             self.uart.flush_input()  # Clear any previous data in the UART buffer
-            if ring == 0:
-                return False
             # Build the payload for the buzzer control command
             payload = bytes([ring, duration])
             # print(f"📦 Buzzer control payload: {payload.hex()}")
@@ -1198,7 +1250,7 @@ class NationReader:
             if response["mid"] == (mid & 0xFF):  # Compare only the MID part
                 result = response["data"][0] if len(response["data"]) > 0 else -1
                 if result == 0x00:
-                    # print("✅ Buzzer control succeeded.")
+                    print("✅ Buzzer control succeeded.")
                     return True
                 else:
                     print(f"❌ Buzzer control failed. Result code: 0x{result:02X}")
@@ -1217,8 +1269,6 @@ class NationReader:
             return False
         
 
-
-        ## Get Session
     
 
     #################################################################################
