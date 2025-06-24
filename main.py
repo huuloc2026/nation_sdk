@@ -52,23 +52,30 @@ def main():
         print("❌ Initialization failed.")
         return
     
-    # test = reader.query_baseband_profile()
-    # print("📊 Baseband profile:", test)
-    # session = reader.get_session()
+    # infor= reader.query_baseband_profile()
+    # print("📡 Baseband profile queried successfully.",infor)
     
-  
-    setSession = reader.configure_reader_session(session=1)
+    session = reader.get_session()
     
+    
+    # reader.configure_baseband(speed=1, q_value=0, session=2, inventory_flag=0) 
+
+
     
     
     
     
 
 
-    # if reader.set_session(1):
-    #     print("Session successfully set to 1.")
-    # if reader.set_session(1):
-    #     print("Session successfully set to 1.")
+    
+    
+   
+    
+    
+    
+
+    
+    
     # Enable các anten hub 1, 2, 3
     # for a in [1, 2, 3]:
     #     reader.enable_ant(a)
@@ -99,46 +106,34 @@ def main():
     #     else:
     #         print(f"  ⚠️ Antenna {ant}: N/A")
     
-    
-    
-    
-    # Set all baseband parameters
-    # reader.set_baseband_params(speed=3, q_value=4, session=2, inventory_flag=0)
-
-   
-
-    # test = reader.query_baseband_profile(verbose=True)
-    # print("📊 Baseband profile:", test)
-    
-    # if success:
-    #     print("🎉 Baseband successfully configured.")
-    # else:
-    #     print("❌ Baseband configuration failed.")
-    
+    # profilemock = reader.select_profile(0)
+    # print("📊 Chọn profile:", profilemock)
 
  
-    try:
-        print("▶️ Bắt đầu đọc tag (ấn Ctrl+C để dừng)...")
+    # try:
+    #     print("▶️ Bắt đầu đọc tag (ấn Ctrl+C để dừng)...")
     
-        # reader.start_inventory(on_tag=on_tag_callback, on_inventory_end=on_end_callback)
-        reader.start_inventory_with_mode(mode=0,callback=on_tag_callback)
+    #     # reader.start_inventory(on_tag=on_tag_callback, on_inventory_end=on_end_callback)
+        
+
+    #     # reader.start_inventory_with_mode(mode=0,callback=on_tag_callback)
        
    
-        time.sleep(1000)
+    #     # time.sleep(1000)
         
-    except KeyboardInterrupt:
-        reader.stop_inventory()
-        print("\n🛑 Đã nhận Ctrl+C – dừng đọc tag...")
+    # except KeyboardInterrupt:
+    #     reader.stop_inventory()
+    #     print("\n🛑 Đã nhận Ctrl+C – dừng đọc tag...")
         
-    finally:
-        success = reader.stop_inventory()
+    # finally:
+    #     success = reader.stop_inventory()
         
-        if success:
-            print("✅ Inventory đã dừng thành công")
-        else:
-            print("❌ Không thể dừng reader")
-        reader.close()
-        print("🔌 Đóng kết nối UART")
+    #     if success:
+    #         print("✅ Inventory đã dừng thành công")
+    #     else:
+    #         print("❌ Không thể dừng reader")
+    #     reader.close()
+    #     print("🔌 Đóng kết nối UART")
 
 
 if __name__ == "__main__":

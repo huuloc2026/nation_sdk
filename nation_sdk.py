@@ -132,8 +132,8 @@ class MID(IntEnum):
 
 
     # RFID Baseband
-    CONFIG_BASEBAND = (0x01 << 8) | 0x0B 
-    QUERY_BASEBAND = 0x0C
+    CONFIG_BASEBAND = 0x020B
+    QUERY_BASEBAND = 0x020C
     
     
     #Session Management
@@ -185,6 +185,7 @@ class NationReader:
     @staticmethod
     def crc16_ccitt(data: bytes) -> int:
         crc = 0x0000
+        
         for byte in data:
             crc ^= byte << 8
             for _ in range(8):
@@ -703,31 +704,22 @@ class NationReader:
         self._inventory_thread = threading.Thread(target=self._receive_inventory_loop)
         self._inventory_thread.start()
 
+
     def start_inventory_with_mode(self, mode: int = 0, callback=None) -> bool:
         """
-        Set baseband mode, then start inventory.
+        Select baseband profile, then start inventory.
+        modes:
+        0 → Fast profile (ID 0)
+        1 → Dense profile (ID 1)
+        2 → Balanced/Auto profile (ID 2)
         """
-        profiles = {
-            0: dict(speed=3, session=0, q=0, flag=2),   # Fast inventory
-            1: dict(speed=1, session=2, q=4, flag=0),   # Dense tag environment
-            2: dict(speed=255, session=1, q=5, flag=2), # Auto speed
-        }
-
-        if mode not in profiles:
+        if mode not in (0, 1, 2):
             print(f"❌ Invalid mode: {mode}")
             return False
 
-        config = profiles[mode]
-
-        # 1. Set baseband parameters first
-        # if not self.configure_reader_session(
-        #     speed=config['speed'],
-        #     q_value=config['q'],
-        #     session=config['session'],
-        #     inventory_flag=config['flag']
-        # ):
-        #     print("❌ Failed to set baseband parameters. Inventory not started.")
-        #     return False
+        if not self.select_profile(mode):
+            print("❌ Failed to set reader profile. Inventory not started.")
+            return False
 
         try:
             self.uart.flush_input()
@@ -738,19 +730,19 @@ class NationReader:
             payload = self.build_epc_read_payload()
             frame = self.build_frame(mid=MID.READ_EPC_TAG, payload=payload, rs485=self.rs485)
             self.send(frame)
-            print(f"🚀 Inventory started with mode {mode} (speed={config['speed']}, q={config['q']}, session={config['session']}, flag={config['flag']})")
 
+            print(f"🚀 Inventory started using reader profile {mode}")
             self._inventory_thread = threading.Thread(target=self._receive_inventory_loop)
             self._inventory_thread.start()
-
             return True
         except Exception as e:
             print(f"❌ Exception in start_inventory_with_mode: {e}")
             return False
-    
+
+
     def _receive_inventory_loop(self):
         while self._inventory_running:
-            try:
+            try:    
                 raw = self.receive(64)
                 if not raw:
                     continue
@@ -844,6 +836,8 @@ class NationReader:
 
         print("❌ STOP failed: no valid response or reading end notification after 10 attempts.")
         return False
+
+
 
     ################################################################################
     #                            ANT HEADER                                        #
@@ -1302,158 +1296,101 @@ class NationReader:
         print("❌ Reader did not enter Idle state after retries.")
         return False
 
-
-    def force_idle(self):
+    def configure_baseband(self, speed: int, q_value: int, session: int, inventory_flag: int) -> bool:
         """
-        Ensures reader is fully in idle state using double STOP + settle delay.
+        Configure the EPC baseband parameters using TLV encoding.
+        Uses MID = 0x0B, Category = 0x01 per protocol spec.
         """
-        for i in range(2):
-            self.uart.flush_input()
-            stop_frame = self.build_frame(mid=MID.STOP_INVENTORY, payload=b'', rs485=self.rs485)
-            self.uart.send(stop_frame)
-            raw = self.uart.receive(64)
-            if raw:
-                response = self.parse_frame(raw)
-                # print(f"🔁 STOP {i+1} response: {response}")
-        # print("⏳ Waiting 1.2s for deep idle...")
-        time.sleep(1.2)
 
-
-    # def set_session(self, session: int) -> bool:
-    #     """
-    #     Sets the EPC baseband Session parameter using MID = 0x0B and PID = 0x03.
-    #     :param session: Must be 0, 1, 2, or 3
-    #     :return: True if successful, False otherwise
-    #     """
-    #     try:
-    #         if session not in (0, 1, 2, 3):
-    #             print(f"❌ Invalid session value: {session}")
-    #             return False
-
-    #         self.force_idle()
-    #         self.uart.flush_input()
-            
-
-    #         payload = bytes([0x03, session])  # PID = 0x03, value = session
-    #         frame = self.build_frame(mid=0x0B, payload=payload, rs485=self.rs485)
-    #         self.uart.send(frame)
-
-    #         raw = self.uart.receive(64)
-    #         if not raw:
-    #             print("❌ No response for set session.")
-    #             return False
-
-    #         frames = self.extract_valid_frames(raw)
-    #         if not frames:
-    #             print("❌ No valid frames extracted.")
-    #             return False
-
-    #         response = self.parse_frame(frames[0])
-    #         print(f"📦 Parsed response: {response}")
-
-    #         if response["mid"] == 0x00:
-    #             error = response["data"][0]
-    #             if error == 0x00:
-    #                 print("✅ Session set successfully.")
-    #                 return True
-    #             elif error == 0x03:
-    #                 print("❌ Session parameter error (invalid value).")
-    #             elif error == 0x02:
-    #                 print("❌ Command not allowed: Reader not idle.")
-    #             else:
-    #                 print(f"❌ Unknown error: 0x{error:02X}")
-    #             return False
-
-    #         elif response["mid"] == 0x0B:
-    #             print("✅ Session set successfully (direct success response).")
-    #             return True
-
-    #         print(f"❌ Unexpected response MID: 0x{response['mid']:02X}")
-    #         return False
-
-    #     except Exception as e:
-    #         print(f"❌ Exception in set_session: {e}")
-    #         return False
-
-    def set_session(self, session: int) -> bool:
-        """
-        Sets the EPC baseband Session parameter using MID = 0x0B and PID = 0x03.
-        :param session: Must be 0, 1, 2, or 3
-        :return: True if successful, False otherwise
-        """
+        # --- Step 1: Validate Inputs ---
+        if speed not in (0, 1, 2, 3, 4, 255):
+            print(f"❌ Invalid speed: {speed}")
+            return False
+        if not (0 <= q_value <= 15):
+            print(f"❌ Invalid Q: {q_value}")
+            return False
         if session not in (0, 1, 2, 3):
-            print(f"❌ Invalid session value: {session}")
+            print(f"❌ Invalid session: {session}")
+            return False
+        if inventory_flag not in (0, 1, 2):
+            print(f"❌ Invalid flag: {inventory_flag}")
             return False
 
-        self.force_idle()
-
-        
-        self.uart.flush_input()
-        success = self.set_epc_baseband_param(0x03, session)
-        print(success)
-        if not success:
-            print("❌ Failed to set session parameter.")
-            return False
-        return success
-    
-    def configure_reader_session(self, session=1, q_value=4, inventory_flag=0, speed=3) -> bool:
-        self.stop_inventory()
-        self.uart.flush_input()
-        if not self.wait_until_idle():
-            print("⛔ Reader not idle after STOP. Forcing recovery...")
-            self.force_recover_and_reinit()
-        success = all([
-            self.set_epc_baseband_param(0x01, q_value),        # Q
-            self.set_epc_baseband_param(0x02, inventory_flag), # InventoryFlag
-            self.set_epc_baseband_param(0x03, session),        # Session
-            self.set_epc_baseband_param(0x00, speed),          # Optional
-        ])
-        return success
-    
-    def set_epc_baseband_param(self, pid: int, value: int) -> bool:
         try:
+            # --- Step 2: Ensure Reader Idle ---
+            self.stop_inventory()
+            if not self.is_idle():
+                print("❌ Reader not idle")
+                return False
+            time.sleep(0.1)
             self.uart.flush_input()
-            payload = bytes([pid, value])
-            frame = self.build_frame(mid=0x0B, payload=payload, rs485=self.rs485)
+
+            # --- Step 3: Encode TLV Payload ---
+            payload = bytes([
+                0x01, speed,
+                0x02, q_value,
+                0x03, session,
+                0x04, inventory_flag
+            ])
+
+            # --- Step 4: Build Frame with Correct MID Format ---
+            mid_value =  MID.CONFIG_BASEBAND  
+            frame = self.build_frame(
+                mid=mid_value,
+                payload=payload,
+                rs485=False,
+                notify=False
+            )
+            print(f"📤 sent Frame: {frame}")
+
+            # --- Step 5: Send Frame ---
             self.uart.send(frame)
 
+            # --- Step 6: Wait + Parse Response ---
             raw = self.uart.receive(64)
-            if not raw:
-                print(f"❌ No response for PID 0x{pid:02X}")
-                return False
-
+            print(f"📥 Raw: {raw.hex()}")
             frames = self.extract_valid_frames(raw)
             if not frames:
-                print(f"❌ No valid frame for PID 0x{pid:02X}")
+                print("❌ No valid response")
                 return False
 
-            response = self.parse_frame(frames[0])
-            print(f"📦 Response for PID 0x{pid:02X}: {response}")
+            for f in frames:
+                resp = self.parse_frame(f)
+                if resp['mid'] == 0x0B and resp['category'] in (0x01, 0x02):
+                    code = resp['data'][0]
+                    if code == 0x00:
+                        print("✅ CONFIG_BASEBAND OK")
+                        return True
+                    else:
+                        errors = {
+                            0x01: "Unsupported baseband",
+                            0x02: "Q param error",
+                            0x03: "Session error",
+                            0x04: "Flag error",
+                            0x05: "Other param error",
+                            0x06: "Save failed"
+                        }
+                        print(f"❌ Error: {errors.get(code, f'Code 0x{code:02X}')}")
+                        return False
 
-            if response["mid"] == 0x00:
-                error = response["data"][0]
-                if error == 0x00:
-                    print(f"✅ PID 0x{pid:02X} set successfully.")
-                    return True
-                elif error == 0x02:
-                    print(f"❌ PID 0x{pid:02X} rejected: Reader not idle.")
-                elif error == 0x03:
-                    print(f"❌ PID 0x{pid:02X} rejected: Invalid value.")
-                else:
-                    print(f"❌ PID 0x{pid:02X} failed with unknown error: 0x{error:02X}")
-                return False
+                elif resp['mid'] == 0x00:  # Generic error
+                    err = resp['data'][0] if resp['data'] else None
+                    generic = {
+                        0x01: "Unsupported instruction",
+                        0x02: "CRC or mode error",
+                        0x03: "Param error",
+                        0x04: "Busy",
+                        0x05: "Invalid state"
+                    }
+                    print(f"❌ Generic error: {generic.get(err, f'0x{err:02X}')}")
+                    return False
 
-            elif response["mid"] == 0x0B:
-                print(f"✅ PID 0x{pid:02X} set successfully (direct response).")
-                return True
-
-            print(f"❌ Unexpected MID: 0x{response['mid']:02X}")
+            print("❌ No valid CONFIG_BASEBAND reply")
             return False
 
         except Exception as e:
-            print(f"❌ Exception setting PID 0x{pid:02X}: {e}")
+            print(f"❌ Exception: {e}")
             return False
-    
 
 
     def query_baseband_profile(self) -> dict:
@@ -1462,29 +1399,31 @@ class NationReader:
         Returns a dict: {speed, q_value, session, inventory_flag}
         """
         try:
+            self.stop_inventory()  # Ensure reader is idle before querying
             self.uart.flush_input()
             # MID = 0x0C in category 0x01 (see MID.QUERY_BASEBAND)
             frame = self.build_frame(mid=MID.QUERY_BASEBAND, payload=b'', rs485=False)
             self.uart.send(frame)
-
+            
+            print(f"🧩 seht response: {frame.hex()}")
             raw = self.uart.receive(64)
             if not raw:
                 print("❌ No response for baseband profile query.")
                 return {}
 
             frames = self.extract_valid_frames(raw)
-            print(f"📥 Raw response: ",frames)
+            
             if not frames:
                 print("❌ No valid frames extracted.")
                 return {}
 
-            print(f"📥 Raw response: {frames}")
+            
             frame_data = frames[0]  # first valid frame
 
             response = self.parse_frame(frame_data)
-
             # Data: [speed, q_value, session, inventory_flag]
             data = response['data']
+            
             if len(data) < 4:
                 print("❌ Invalid baseband profile length.")
                 return {}
@@ -1495,58 +1434,9 @@ class NationReader:
                 "session": data[2],
                 "inventory_flag": data[3]
             }
+            
         except Exception as e:
             print(f"❌ Exception in query_baseband_profile: {e}")
             return {}
 
-    def wait_until_idle(self, timeout=2.0, idle_grace_period=0.5) -> bool:
-        """
-        Wait until the reader is truly idle (no EPC notification during grace period).
-        """
-        start = time.time()
-        last_activity = time.time()
 
-        while time.time() - start < timeout:
-            raw = self.uart.receive(64)
-            frames = self.extract_valid_frames(raw)
-            if frames:
-                for f in frames:
-                    parsed = self.parse_frame(f)
-                    if parsed["mid"] == 0x00:  # Tag notification
-                        last_activity = time.time()
-            if time.time() - last_activity > idle_grace_period:
-                print("✅ Reader appears idle (no EPC notifications).")
-                return True
-            time.sleep(0.05)
-        
-        print("⚠️ Timeout waiting for reader to become idle.")
-        return False
-
-    def force_recover_and_reinit(self):
-        """
-        Full hard recovery sequence for stuck inventory state.
-        """
-        print("🚨 Force recovery initiated...")
-        self.stop_inventory()
-        self.drain_leftover_notifications()
-
-        # Send RESTART command
-        restart_frame = self.build_frame(mid=0x0A, payload=b'')
-        self.send(restart_frame)
-        print("🔁 Restart command sent... waiting for reboot")
-
-        time.sleep(1.2)  # Give reader time to reboot
-
-        # Try querying info
-        try:
-            # info = self.Query_Reader_Information()
-            # print(f"✅ Reader info after recovery: {info}")
-            return True
-        except Exception as e:
-            print(f"❌ Reader failed to recover: {e}")
-            return False
-
-
-
-
-   
